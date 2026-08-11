@@ -1,0 +1,26 @@
+{
+  "name": "orbis",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "scan": "ENGINE_MODE=scan bun run src/index.ts",
+    "dry-run": "ENGINE_MODE=dry-run bun run src/index.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "testnet-probe": "bun run scripts/testnet-probe.ts",
+    "execute": "bun run scripts/execute.ts",
+    "telegram-bot": "bun run scripts/telegram-bot.ts",
+    "discovery-bot": "bun run scripts/discovery-bot.ts"
+  },
+  "dependencies": {
+    "viem": "latest"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "ganache": "^7.9.2",
+    "solc": "^0.8.36",
+    "typescript": "latest"
+  }
+}
