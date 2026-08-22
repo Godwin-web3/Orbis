@@ -3,6 +3,7 @@ import type { DiscoverySource } from "../../domain/ports";
 import type { MintCandidate } from "../../domain/types";
 import type { BlockCursorStore } from "./block-cursor";
 import type { ContractRegistry } from "./contract-registry";
+import { fetchLogsViaEtherscan } from "./etherscan-logs";
 
 // OpenSea's SeaDrop singleton — identical address across Ethereum, Base, and Robinhood
 // Chain (cross-verified against two independent third-party mint tools that hardcode
@@ -14,10 +15,15 @@ const ZERO_ADDRESS: Address = "0x0000000000000000000000000000000000000000";
 
 // ISeaDrop.SeaDropMint — verified by hashing the candidate signature and matching it
 // byte-for-byte against the real topic0 observed via eth_getLogs against SEADROP_ADDRESS
-// on Ethereum mainnet (event sig hash 0xe90cf9cc0a552cf52ea6ff74ece0f1c8ae8cc9ad630d3181f55ac43ca076b7d6).
+// on Ethereum mainnet. nftContract is indexed first, so it lands at topics[1].
+const SEADROP_MINT_TOPIC0 = "0xe90cf9cc0a552cf52ea6ff74ece0f1c8ae8cc9ad630d3181f55ac43ca076b7d6" as `0x${string}`;
 const SEADROP_MINT_EVENT = parseAbiItem(
   "event SeaDropMint(address indexed nftContract, address indexed minter, address indexed feeRecipient, address payer, uint256 quantityMinted, uint256 unitMintPrice, uint256 feeBps, uint256 dropStageIndex)"
 );
+
+function topicToAddress(topic: `0x${string}`): Address {
+  return `0x${topic.slice(-40)}` as Address;
+}
 
 const SEADROP_ABI = [
   {
@@ -39,8 +45,9 @@ const SEADROP_ABI = [
 ] as const satisfies Abi;
 
 const MAX_BLOCK_RANGE = 50n;
+const ETHERSCAN_BLOCK_RANGE = 5000n;
 
-export type SeaDropDiscoveryConfig = { chainKey: string; rpcUrls: string[]; confirmations?: bigint; client?: PublicClient; cursor?: BlockCursorStore; registry?: ContractRegistry; quantity?: number };
+export type SeaDropDiscoveryConfig = { chainKey: string; rpcUrls: string[]; confirmations?: bigint; client?: PublicClient; cursor?: BlockCursorStore; registry?: ContractRegistry; quantity?: number; etherscan?: { apiKey: string; chainId: number } };
 
 /**
  * Watches OpenSea's SeaDrop singleton for live mint activity, then confirms each
@@ -58,6 +65,13 @@ export type SeaDropDiscoveryConfig = { chainKey: string; rpcUrls: string[]; conf
  * given, remembers every contract ever seen here and re-checks all of them on every
  * scan (in addition to whatever's newly minting), so a known-but-currently-quiet drop
  * keeps being offered for as long as it stays free and open.
+ *
+ * `etherscan`, when given, fetches the log scan via Etherscan's API instead of a raw
+ * eth_getLogs call and widens the per-scan range from 50 to 5000 blocks — real SeaDrop
+ * mint activity on Ethereum right now is sparse enough (observed: only a couple of
+ * events per hour chain-wide) that a 50-block/minute window can go a long time without
+ * a fresh event to seed the registry from. A wider range means fewer scans needed to
+ * catch that first mint for a given collection.
  */
 export class SeaDropDiscoverySource implements DiscoverySource {
   readonly name = "seadrop";
@@ -81,17 +95,27 @@ export class SeaDropDiscoverySource implements DiscoverySource {
     const safeLatest = latest - (this.config.confirmations ?? 2n);
     const cursorKey = `seadrop:${this.config.chainKey}`;
     const stored = this.config.cursor ? await this.config.cursor.get(cursorKey) : undefined;
+    const range = this.config.etherscan ? ETHERSCAN_BLOCK_RANGE : MAX_BLOCK_RANGE;
     const defaultStart = safeLatest > 20n ? safeLatest - 20n : 0n;
     const fromBlock = stored !== undefined && stored + 1n <= safeLatest ? stored + 1n : defaultStart;
     if (fromBlock > safeLatest) return [];
-    const toBlock = fromBlock + MAX_BLOCK_RANGE - 1n < safeLatest ? fromBlock + MAX_BLOCK_RANGE - 1n : safeLatest;
-
-    const logs = await client.getLogs({ address: SEADROP_ADDRESS, event: SEADROP_MINT_EVENT, fromBlock, toBlock });
+    const toBlock = fromBlock + range - 1n < safeLatest ? fromBlock + range - 1n : safeLatest;
 
     const registryKey = this.config.chainKey;
     const newlySeen = new Set<Address>();
-    for (const log of logs) {
-      if (log.args.nftContract) newlySeen.add(log.args.nftContract);
+    let eventCount = 0;
+    if (this.config.etherscan) {
+      const logs = await fetchLogsViaEtherscan(this.config.etherscan, { address: SEADROP_ADDRESS, topics: [SEADROP_MINT_TOPIC0], fromBlock, toBlock });
+      eventCount = logs.length;
+      for (const log of logs) {
+        if (log.topics[1]) newlySeen.add(topicToAddress(log.topics[1]));
+      }
+    } else {
+      const logs = await client.getLogs({ address: SEADROP_ADDRESS, event: SEADROP_MINT_EVENT, fromBlock, toBlock });
+      eventCount = logs.length;
+      for (const log of logs) {
+        if (log.args.nftContract) newlySeen.add(log.args.nftContract);
+      }
     }
     const known = this.config.registry ? await this.config.registry.list(registryKey) : [];
     const contracts = new Set<Address>([...known, ...newlySeen]);
@@ -102,7 +126,7 @@ export class SeaDropDiscoverySource implements DiscoverySource {
       if (candidate) candidates.push(candidate);
     }
     if (this.config.registry) for (const contract of newlySeen) await this.config.registry.add(registryKey, contract);
-    console.log(`[${this.config.chainKey}] seadrop: scanned blocks ${fromBlock}-${toBlock}, ${logs.length} mint event(s), ${newlySeen.size} new + ${known.length} known contract(s) checked, ${candidates.length} currently free+open`);
+    console.log(`[${this.config.chainKey}] seadrop: scanned blocks ${fromBlock}-${toBlock}, ${eventCount} mint event(s), ${newlySeen.size} new + ${known.length} known contract(s) checked, ${candidates.length} currently free+open`);
 
     if (this.config.cursor) await this.config.cursor.set(cursorKey, toBlock);
     return candidates;

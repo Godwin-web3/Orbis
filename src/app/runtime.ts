@@ -39,13 +39,22 @@ export function buildRuntime(overrides?: { candidateStore?: CandidateStore; prep
   const chainUrls = activeChains.flatMap((chain) => urlsFor(chain.key).map((rpcUrl) => ({ chainKey: chain.key, rpcUrl })));
   const blockCursor = overrides?.blockCursor ?? new JsonlBlockCursorStore(process.env.BLOCK_CURSOR_PATH ?? "data/block-cursor.json");
   const contractRegistry = overrides?.contractRegistry ?? new JsonlContractRegistry(process.env.CONTRACT_REGISTRY_PATH ?? "data/contract-registry.json");
+  // Etherscan's unified v2 API (one key, `chainid` param) replaces raw eth_getLogs for
+  // whichever chains are listed here — it doesn't reject address-less queries or large
+  // block ranges the way free public RPC nodes do. Scoped to Ethereum only for now
+  // (ETHERSCAN_CHAINS lets that widen later without a code change).
+  const etherscanApiKey = process.env.ETHERSCAN_API_KEY;
+  const etherscanChains = new Set((process.env.ETHERSCAN_CHAINS ?? "ethereum").split(",").map((key) => key.trim()).filter(Boolean));
+  const etherscanFor = (chainKey: string) => etherscanApiKey && etherscanChains.has(chainKey) ? { apiKey: etherscanApiKey, chainId: chains[chainKey].chainId } : undefined;
+
   const sources = activeChains.flatMap((chain) => {
     const rpcUrls = urlsFor(chain.key); if (!rpcUrls.length) return [];
     const contracts = (process.env[`${chain.key.toUpperCase()}_CONTRACTS`] ?? "").split(",").map((address) => address.trim()).filter(Boolean) as `0x${string}`[];
-    const primary = process.env.DISCOVERY_MODE === "blocks" ? new BlockContractDiscoverySource({ chainKey: chain.key, rpcUrls, confirmations: BigInt(process.env.CONFIRMATIONS ?? "2"), cursor: blockCursor }) : new EvmRpcDiscoverySource({ chainKey: chain.key, rpcUrls, contracts });
+    const etherscan = etherscanFor(chain.key);
+    const primary = process.env.DISCOVERY_MODE === "blocks" ? new BlockContractDiscoverySource({ chainKey: chain.key, rpcUrls, confirmations: BigInt(process.env.CONFIRMATIONS ?? "2"), cursor: blockCursor, etherscan }) : new EvmRpcDiscoverySource({ chainKey: chain.key, rpcUrls, contracts });
     // SeaDrop discovery runs alongside whatever DISCOVERY_MODE is configured — it only
     // catches SeaDrop-launched collections, not a replacement for the general scanner.
-    const seadrop = process.env.SEADROP_DISCOVERY === "off" ? [] : [new SeaDropDiscoverySource({ chainKey: chain.key, rpcUrls, confirmations: BigInt(process.env.CONFIRMATIONS ?? "2"), cursor: blockCursor, registry: contractRegistry })];
+    const seadrop = process.env.SEADROP_DISCOVERY === "off" ? [] : [new SeaDropDiscoverySource({ chainKey: chain.key, rpcUrls, confirmations: BigInt(process.env.CONFIRMATIONS ?? "2"), cursor: blockCursor, registry: contractRegistry, etherscan })];
     return [primary, ...seadrop];
   });
   const clients = makeClients(chainUrls);

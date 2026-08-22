@@ -1,8 +1,24 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import type { Address, PublicClient } from "viem";
 import { SEADROP_ADDRESS, SeaDropDiscoverySource } from "../src/discovery/rpc/seadrop-source";
 import type { BlockCursorStore } from "../src/discovery/rpc/block-cursor";
 import type { ContractRegistry } from "../src/discovery/rpc/contract-registry";
+
+const originalFetch = globalThis.fetch;
+afterEach(() => { globalThis.fetch = originalFetch; });
+
+function stubEtherscanFetch(result: object[]) {
+  const calls: string[] = [];
+  globalThis.fetch = (async (input: string | URL) => {
+    calls.push(input.toString());
+    return { json: async () => ({ status: "1", message: "OK", result }) } as Response;
+  }) as typeof fetch;
+  return calls;
+}
+
+function toTopic(address: Address): `0x${string}` {
+  return `0x${"0".repeat(24)}${address.slice(2)}`;
+}
 
 const CONTRACT_A = "0x0000000000000000000000000000000000000010" as `0x${string}`;
 const CONTRACT_B = "0x0000000000000000000000000000000000000020" as `0x${string}`;
@@ -211,5 +227,29 @@ describe("SeaDropDiscoverySource", () => {
     const candidates = await source.discover();
     expect(candidates.length).toBe(2);
     expect(new Set(candidates.map((c) => c.metadata.nftContract))).toEqual(new Set([CONTRACT_A, CONTRACT_B]));
+  });
+
+  test("uses Etherscan instead of raw getLogs when configured, extracting nftContract from topics[1]", async () => {
+    const cursor = memCursor();
+    stubEtherscanFetch([{ address: SEADROP_ADDRESS, topics: ["0xsig", toTopic(CONTRACT_A), toTopic("0x0000000000000000000000000000000000000099" as Address)], data: "0x", blockNumber: "0x3e8" }]);
+    const client = fakeClient({ latest: 1000n, drops: { [CONTRACT_A]: freeOpenDrop() } });
+    const source = new SeaDropDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, confirmations: 2n, etherscan: { apiKey: "key", chainId: 1 } });
+
+    const candidates = await source.discover();
+    expect(candidates.length).toBe(1);
+    expect(candidates[0].metadata.nftContract).toBe(CONTRACT_A);
+  });
+
+  test("Etherscan-backed scan requests the wider 5000-block range", async () => {
+    const cursor = memCursor();
+    await cursor.set("seadrop:ethereum", 1000n);
+    const calls = stubEtherscanFetch([]);
+    const client = fakeClient({ latest: 10000n });
+    const source = new SeaDropDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, confirmations: 2n, etherscan: { apiKey: "key", chainId: 1 } });
+    await source.discover();
+    const url = new URL(calls[0]);
+    expect(url.searchParams.get("fromBlock")).toBe("1001");
+    expect(url.searchParams.get("toBlock")).toBe("6000");
+    expect(url.searchParams.get("address")).toBe(SEADROP_ADDRESS);
   });
 });

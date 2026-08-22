@@ -1,7 +1,19 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { encodeFunctionData, type PublicClient } from "viem";
 import { BlockContractDiscoverySource } from "../src/discovery/rpc/block-source";
 import type { BlockCursorStore } from "../src/discovery/rpc/block-cursor";
+
+const originalFetch = globalThis.fetch;
+afterEach(() => { globalThis.fetch = originalFetch; });
+
+function stubEtherscanFetch(result: object[]) {
+  const calls: string[] = [];
+  globalThis.fetch = (async (input: string | URL) => {
+    calls.push(input.toString());
+    return { json: async () => ({ status: "1", message: "OK", result }) } as Response;
+  }) as typeof fetch;
+  return calls;
+}
 
 const MINT_SELECTOR = encodeFunctionData({
   abi: [{ type: "function", name: "mint", stateMutability: "payable", inputs: [], outputs: [] }],
@@ -116,6 +128,45 @@ describe("BlockContractDiscoverySource", () => {
     await cursor.set("base", 999n);
     const client = fakeClient({ latest: 1000n, logAddresses: [] });
     const source = new BlockContractDiscoverySource({ chainKey: "base", rpcUrls: [], client, cursor, confirmations: 2n });
+    expect(await source.discover()).toEqual([]);
+  });
+
+  test("uses Etherscan instead of raw getLogs when configured, and widens the block range", async () => {
+    const cursor = memCursor();
+    const contract = "0x0000000000000000000000000000000000000007" as `0x${string}`;
+    const calls = stubEtherscanFetch([{ address: contract, topics: ERC721_TOPICS, data: "0x", blockNumber: "0x3e8" }]);
+    const client = { getBlockNumber: async () => 10000n, getBytecode: async () => MINT_BYTECODE } as unknown as PublicClient;
+    const source = new BlockContractDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, confirmations: 2n, etherscan: { apiKey: "key", chainId: 1 } });
+
+    const candidates = await source.discover();
+    expect(candidates.length).toBeGreaterThan(0);
+    expect(candidates[0].contract).toBe(contract);
+    const url = new URL(calls[0]);
+    // No cursor yet, so fromBlock is the fixed 20-block default lookback (safeLatest=9998); the
+    // 5000-block Etherscan range only matters once a cursor exists and there's real ground to cover.
+    expect(url.searchParams.get("fromBlock")).toBe("9978");
+    expect(url.searchParams.get("toBlock")).toBe("9998");
+  });
+
+  test("with a cursor already behind, Etherscan covers the full 5000-block range in one call", async () => {
+    const cursor = memCursor();
+    await cursor.set("ethereum", 1000n);
+    const contract = "0x0000000000000000000000000000000000000009" as `0x${string}`;
+    const calls = stubEtherscanFetch([{ address: contract, topics: ERC721_TOPICS, data: "0x", blockNumber: "0x3e8" }]);
+    const client = { getBlockNumber: async () => 10000n, getBytecode: async () => MINT_BYTECODE } as unknown as PublicClient;
+    const source = new BlockContractDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, confirmations: 2n, etherscan: { apiKey: "key", chainId: 1 } });
+    await source.discover();
+    const url = new URL(calls[0]);
+    expect(url.searchParams.get("fromBlock")).toBe("1001");
+    expect(url.searchParams.get("toBlock")).toBe("6000");
+  });
+
+  test("still filters out ERC-20 Transfer logs when using Etherscan", async () => {
+    const cursor = memCursor();
+    const contract = "0x0000000000000000000000000000000000000008" as `0x${string}`;
+    stubEtherscanFetch([{ address: contract, topics: ERC20_TOPICS, data: "0x", blockNumber: "0x3e8" }]);
+    const client = { getBlockNumber: async () => 10000n, getBytecode: async () => MINT_BYTECODE } as unknown as PublicClient;
+    const source = new BlockContractDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, confirmations: 2n, etherscan: { apiKey: "key", chainId: 1 } });
     expect(await source.discover()).toEqual([]);
   });
 });

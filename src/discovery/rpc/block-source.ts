@@ -1,26 +1,31 @@
-import { createPublicClient, http, parseAbiItem, type Address, type PublicClient } from "viem";
+import { createPublicClient, http, pad, parseAbiItem, type Address, type PublicClient } from "viem";
 import type { DiscoverySource } from "../../domain/ports";
 import type { MintCandidate } from "../../domain/types";
 import { detectMintFunction, identifyCandidate } from "../contract/detector";
 import type { BlockCursorStore } from "./block-cursor";
+import { fetchLogsViaEtherscan } from "./etherscan-logs";
 
 const TRANSFER_EVENT = parseAbiItem("event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)");
 const ZERO_ADDRESS: Address = "0x0000000000000000000000000000000000000000";
+const TRANSFER_TOPIC0 = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef" as `0x${string}`;
+const ZERO_ADDRESS_TOPIC = pad(ZERO_ADDRESS, { size: 32 });
 
 // Per-scan block range caps. Conservative defaults since free/public RPC providers often
 // reject large eth_getLogs ranges; on failure we retry once with a much smaller range
-// rather than giving up the whole pass.
+// rather than giving up the whole pass. Etherscan doesn't have that restriction, so a
+// source configured with `etherscan` uses a much wider range instead (see fetchLogs).
 const MAX_BLOCK_RANGE = 50n;
 const RETRY_BLOCK_RANGE = 10n;
+const ETHERSCAN_BLOCK_RANGE = 5000n;
 
-export type BlockDiscoveryConfig = { chainKey: string; rpcUrls: string[]; startBlock?: bigint; confirmations?: bigint; client?: PublicClient; cursor?: BlockCursorStore };
+export type BlockDiscoveryConfig = { chainKey: string; rpcUrls: string[]; startBlock?: bigint; confirmations?: bigint; client?: PublicClient; cursor?: BlockCursorStore; etherscan?: { apiKey: string; chainId: number } };
 
 function capRange(from: bigint, safeLatest: bigint, max: bigint): bigint {
   const capped = from + max - 1n;
   return capped < safeLatest ? capped : safeLatest;
 }
 
-type LogsResult = Awaited<ReturnType<PublicClient["getLogs"]>>;
+type LogLike = { address: Address; topics: readonly `0x${string}`[] };
 
 /**
  * Finds NFT mints by watching for ERC-721 `Transfer` events where `from` is the zero
@@ -35,7 +40,10 @@ type LogsResult = Awaited<ReturnType<PublicClient["getLogs"]>>;
  *    it's an expensive whole-chain query. When that happens we fall back to the
  *    original per-block "new contract deployment" scan for that pass — narrower (misses
  *    mints from already-existing contracts) but still functional on a provider that
- *    blocks broad log queries.
+ *    blocks broad log queries. Passing `etherscan` (see fetchLogsViaEtherscan) sidesteps
+ *    this restriction entirely and widens the per-scan block range from 50 to 5000, since
+ *    Etherscan's API doesn't reject address-less queries or large ranges the way a public
+ *    RPC node does.
  * 2. ERC-20 `Transfer(address,address,uint256)` and ERC-721 `Transfer(address,address,
  *    uint256)` share an identical topic0 hash — the only on-the-wire difference is
  *    whether tokenId is indexed (ERC-721: 4 topics, empty data) or not (ERC-20: 3
@@ -86,7 +94,19 @@ export class BlockContractDiscoverySource implements DiscoverySource {
   }
 
   /** Returns undefined (rather than throwing) when the provider rejects broad log queries, so the caller can fall back instead of failing the whole pass. */
-  private async fetchLogs(client: PublicClient, fromBlock: bigint, safeLatest: bigint, setToBlock: (block: bigint) => void): Promise<LogsResult | undefined> {
+  private async fetchLogs(client: PublicClient, fromBlock: bigint, safeLatest: bigint, setToBlock: (block: bigint) => void): Promise<LogLike[] | undefined> {
+    if (this.config.etherscan) {
+      const toBlock = capRange(fromBlock, safeLatest, ETHERSCAN_BLOCK_RANGE);
+      try {
+        const logs = await fetchLogsViaEtherscan(this.config.etherscan, { topics: [TRANSFER_TOPIC0, ZERO_ADDRESS_TOPIC], fromBlock, toBlock });
+        setToBlock(toBlock);
+        return logs;
+      } catch (error) {
+        console.error(`[${this.config.chainKey}] Etherscan getLogs failed for range ${fromBlock}-${toBlock}:`, (error as Error).message);
+        return undefined;
+      }
+    }
+
     let toBlock = capRange(fromBlock, safeLatest, MAX_BLOCK_RANGE);
     try {
       const logs = await client.getLogs({ event: TRANSFER_EVENT, args: { from: ZERO_ADDRESS }, fromBlock, toBlock });
@@ -106,7 +126,7 @@ export class BlockContractDiscoverySource implements DiscoverySource {
     }
   }
 
-  private async candidatesFromLogs(client: PublicClient, logs: LogsResult, fromBlock: bigint, toBlock: bigint): Promise<MintCandidate[]> {
+  private async candidatesFromLogs(client: PublicClient, logs: LogLike[], fromBlock: bigint, toBlock: bigint): Promise<MintCandidate[]> {
     // ERC-721 has tokenId indexed (topic0 + 3 indexed args = 4 topics, empty data).
     // ERC-20 shares the same topic0 but only indexes from/to (3 topics, value in data).
     const contracts = new Set<Address>();
