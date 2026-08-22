@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import type { PublicClient } from "viem";
+import type { Address, PublicClient } from "viem";
 import { SEADROP_ADDRESS, SeaDropDiscoverySource } from "../src/discovery/rpc/seadrop-source";
 import type { BlockCursorStore } from "../src/discovery/rpc/block-cursor";
+import type { ContractRegistry } from "../src/discovery/rpc/contract-registry";
 
 const CONTRACT_A = "0x0000000000000000000000000000000000000010" as `0x${string}`;
 const CONTRACT_B = "0x0000000000000000000000000000000000000020" as `0x${string}`;
@@ -28,6 +29,17 @@ function memCursor(): BlockCursorStore {
   return {
     get: async (chainKey) => store.get(chainKey),
     set: async (chainKey, block) => { store.set(chainKey, block); },
+  };
+}
+
+function memRegistry(seed: Record<string, Address[]> = {}): ContractRegistry {
+  const store = new Map<string, Address[]>(Object.entries(seed));
+  return {
+    list: async (key) => store.get(key) ?? [],
+    add: async (key, contract) => {
+      const existing = store.get(key) ?? [];
+      if (!existing.includes(contract)) store.set(key, [...existing, contract]);
+    },
   };
 }
 
@@ -154,5 +166,50 @@ describe("SeaDropDiscoverySource", () => {
     const client = fakeClient({ latest: 1000n, getLogsThrows: true });
     const source = new SeaDropDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, confirmations: 2n });
     expect(await source.discover()).toEqual([]);
+  });
+
+  test("re-checks a previously known contract with no new mint event this pass, and keeps surfacing it while still free+open", async () => {
+    const cursor = memCursor();
+    const registry = memRegistry({ ethereum: [CONTRACT_A] });
+    // No fresh mint events this scan, but CONTRACT_A is already in the registry from an earlier pass.
+    const client = fakeClient({ latest: 1000n, mintedContracts: [], drops: { [CONTRACT_A]: freeOpenDrop() } });
+    const source = new SeaDropDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, registry, confirmations: 2n });
+
+    const candidates = await source.discover();
+    expect(candidates.length).toBe(1);
+    expect(candidates[0].metadata.nftContract).toBe(CONTRACT_A);
+  });
+
+  test("stops surfacing a known contract once it's no longer free+open, without needing to be removed from the registry", async () => {
+    const cursor = memCursor();
+    const registry = memRegistry({ ethereum: [CONTRACT_A] });
+    const client = fakeClient({ latest: 1000n, mintedContracts: [], drops: { [CONTRACT_A]: freeOpenDrop({ mintPrice: 1n }) } });
+    const source = new SeaDropDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, registry, confirmations: 2n });
+    expect(await source.discover()).toEqual([]);
+  });
+
+  test("adds a newly-minted contract to the registry so future quiet scans still re-check it", async () => {
+    const cursor = memCursor();
+    const registry = memRegistry();
+    const client = fakeClient({ latest: 1000n, mintedContracts: [CONTRACT_A], drops: { [CONTRACT_A]: freeOpenDrop() } });
+    const source = new SeaDropDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, registry, confirmations: 2n });
+
+    await source.discover();
+    expect(await registry.list("ethereum")).toEqual([CONTRACT_A]);
+  });
+
+  test("merges newly-minted and previously-known contracts in one pass without duplicating", async () => {
+    const cursor = memCursor();
+    const registry = memRegistry({ ethereum: [CONTRACT_A] });
+    const client = fakeClient({
+      latest: 1000n,
+      mintedContracts: [CONTRACT_A, CONTRACT_B],
+      drops: { [CONTRACT_A]: freeOpenDrop(), [CONTRACT_B]: freeOpenDrop() },
+    });
+    const source = new SeaDropDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, registry, confirmations: 2n });
+
+    const candidates = await source.discover();
+    expect(candidates.length).toBe(2);
+    expect(new Set(candidates.map((c) => c.metadata.nftContract))).toEqual(new Set([CONTRACT_A, CONTRACT_B]));
   });
 });

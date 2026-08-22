@@ -6,6 +6,7 @@ import type { RegisteredUser, UserRegistry } from "../users/registry";
 import type { UserKeyStore } from "../users/keystore";
 import type { AutoMintAttempt, AutoMintLog } from "../execution/automint";
 import type { BlockCursorStore } from "../discovery/rpc/block-cursor";
+import { CONTRACT_REGISTRY_CAP, type ContractRegistry } from "../discovery/rpc/contract-registry";
 import { decryptSecret, encryptSecret } from "../users/crypto";
 
 /**
@@ -237,6 +238,25 @@ export class SupabaseBlockCursorStore implements BlockCursorStore {
 
   async set(chainKey: string, block: bigint): Promise<void> {
     const { error } = await this.db.from("kv_state").upsert({ key: `block_cursor:${chainKey}`, value: { block: block.toString() }, updated_at: new Date().toISOString() });
+    if (error) throw new Error(`Supabase kv_state upsert failed: ${error.message}`);
+  }
+}
+
+/** Per-key set of previously-seen contracts (e.g. SeaDrop collections), backed by the same generic kv_state table. See ContractRegistry's doc comment for why this exists. */
+export class SupabaseContractRegistry implements ContractRegistry {
+  constructor(private readonly db: SupabaseClient) {}
+
+  async list(key: string): Promise<Address[]> {
+    const { data, error } = await this.db.from("kv_state").select("value").eq("key", `contract_registry:${key}`).maybeSingle();
+    if (error) throw new Error(`Supabase kv_state lookup failed: ${error.message}`);
+    return ((data?.value as { contracts?: Address[] } | undefined)?.contracts ?? []);
+  }
+
+  async add(key: string, contract: Address): Promise<void> {
+    const existing = await this.list(key);
+    if (existing.includes(contract)) return;
+    const contracts = [...existing, contract].slice(-CONTRACT_REGISTRY_CAP);
+    const { error } = await this.db.from("kv_state").upsert({ key: `contract_registry:${key}`, value: { contracts }, updated_at: new Date().toISOString() });
     if (error) throw new Error(`Supabase kv_state upsert failed: ${error.message}`);
   }
 }

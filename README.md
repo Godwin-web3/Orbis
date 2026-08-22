@@ -59,6 +59,8 @@ The simulator deliberately does not claim that a plain `eth_call` proves post-st
 
 Runs alongside whichever `DISCOVERY_MODE` is configured (set `SEADROP_DISCOVERY=off` to disable it). `src/discovery/rpc/seadrop-source.ts` watches OpenSea's SeaDrop singleton contract (`0x00005EA00Ac477B1030CE78506496e8C2dE24bf5` — identical address on Ethereum, Base, and Robinhood Chain) for `SeaDropMint` events, then reads that contract's *current* `getPublicDrop()` config directly on-chain before surfacing a candidate — so a mint only surfaces while it is genuinely free and inside its open window, not just "something minted here recently." Because the query is scoped to the SeaDrop address it works within free RPC providers' restriction on address-less `eth_getLogs` calls. It pre-builds the exact `mintPublic(...)` calldata itself, so it only catches SeaDrop-launched collections — a large share of real free mints, but not all of them — which is why it runs as an addition, not a replacement.
 
+A `SeaDropMint` event only fires when *someone else* mints — a drop can be free and open right now with nobody minting it in this particular scan's block window. To avoid missing those, every contract this source has ever seen is remembered (`ContractRegistry` — JSONL file locally, Supabase's `kv_state` table on the Worker, capped at 200 contracts per chain) and re-checked on every scan, not just ones with a fresh mint event.
+
 ## Chain configuration
 
 Configured network records include Ethereum, Base, Arbitrum, Optimism, Polygon, and Robinhood Chain. RPC URLs are supplied by environment variables; no public RPC endpoint is hardcoded. Robinhood Chain uses chain ID `4663` for mainnet and `46630` for testnet.

@@ -15,6 +15,7 @@ import { MintEngine } from "./engine";
 import { chains, enabledChains } from "../../config/chains";
 import type { CandidateStore, NotificationSink, PreparedTransactionStore } from "../domain/ports";
 import { JsonlBlockCursorStore, type BlockCursorStore } from "../discovery/rpc/block-cursor";
+import { JsonlContractRegistry, type ContractRegistry } from "../discovery/rpc/contract-registry";
 import { SeaDropDiscoverySource } from "../discovery/rpc/seadrop-source";
 
 class CompositeInspector { constructor(private readonly inspectors: { inspect(candidate: import("../domain/types").MintCandidate): Promise<import("../domain/types").MintCandidate> }[]) {} async inspect(candidate: import("../domain/types").MintCandidate) { let result = candidate; for (const inspector of this.inspectors) result = await inspector.inspect(result); return result; } }
@@ -33,17 +34,18 @@ export function urlsFor(chainKey: string): string[] { const config = chains[chai
  * to a single chain (see src/discovery/target.ts's /target handling) sidesteps that
  * rather than trusting the shared multi-chain list for a specific, known contract.
  */
-export function buildRuntime(overrides?: { candidateStore?: CandidateStore; preparedStore?: PreparedTransactionStore; notifications?: NotificationSink[]; blockCursor?: BlockCursorStore; chainKeys?: string[] }): MintEngine {
+export function buildRuntime(overrides?: { candidateStore?: CandidateStore; preparedStore?: PreparedTransactionStore; notifications?: NotificationSink[]; blockCursor?: BlockCursorStore; contractRegistry?: ContractRegistry; chainKeys?: string[] }): MintEngine {
   const activeChains = enabledChains().filter((chain) => !overrides?.chainKeys || overrides.chainKeys.includes(chain.key));
   const chainUrls = activeChains.flatMap((chain) => urlsFor(chain.key).map((rpcUrl) => ({ chainKey: chain.key, rpcUrl })));
   const blockCursor = overrides?.blockCursor ?? new JsonlBlockCursorStore(process.env.BLOCK_CURSOR_PATH ?? "data/block-cursor.json");
+  const contractRegistry = overrides?.contractRegistry ?? new JsonlContractRegistry(process.env.CONTRACT_REGISTRY_PATH ?? "data/contract-registry.json");
   const sources = activeChains.flatMap((chain) => {
     const rpcUrls = urlsFor(chain.key); if (!rpcUrls.length) return [];
     const contracts = (process.env[`${chain.key.toUpperCase()}_CONTRACTS`] ?? "").split(",").map((address) => address.trim()).filter(Boolean) as `0x${string}`[];
     const primary = process.env.DISCOVERY_MODE === "blocks" ? new BlockContractDiscoverySource({ chainKey: chain.key, rpcUrls, confirmations: BigInt(process.env.CONFIRMATIONS ?? "2"), cursor: blockCursor }) : new EvmRpcDiscoverySource({ chainKey: chain.key, rpcUrls, contracts });
     // SeaDrop discovery runs alongside whatever DISCOVERY_MODE is configured — it only
     // catches SeaDrop-launched collections, not a replacement for the general scanner.
-    const seadrop = process.env.SEADROP_DISCOVERY === "off" ? [] : [new SeaDropDiscoverySource({ chainKey: chain.key, rpcUrls, confirmations: BigInt(process.env.CONFIRMATIONS ?? "2"), cursor: blockCursor })];
+    const seadrop = process.env.SEADROP_DISCOVERY === "off" ? [] : [new SeaDropDiscoverySource({ chainKey: chain.key, rpcUrls, confirmations: BigInt(process.env.CONFIRMATIONS ?? "2"), cursor: blockCursor, registry: contractRegistry })];
     return [primary, ...seadrop];
   });
   const clients = makeClients(chainUrls);

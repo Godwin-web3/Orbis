@@ -2,6 +2,7 @@ import { createPublicClient, http, encodeFunctionData, parseAbiItem, type Abi, t
 import type { DiscoverySource } from "../../domain/ports";
 import type { MintCandidate } from "../../domain/types";
 import type { BlockCursorStore } from "./block-cursor";
+import type { ContractRegistry } from "./contract-registry";
 
 // OpenSea's SeaDrop singleton — identical address across Ethereum, Base, and Robinhood
 // Chain (cross-verified against two independent third-party mint tools that hardcode
@@ -39,7 +40,7 @@ const SEADROP_ABI = [
 
 const MAX_BLOCK_RANGE = 50n;
 
-export type SeaDropDiscoveryConfig = { chainKey: string; rpcUrls: string[]; confirmations?: bigint; client?: PublicClient; cursor?: BlockCursorStore; quantity?: number };
+export type SeaDropDiscoveryConfig = { chainKey: string; rpcUrls: string[]; confirmations?: bigint; client?: PublicClient; cursor?: BlockCursorStore; registry?: ContractRegistry; quantity?: number };
 
 /**
  * Watches OpenSea's SeaDrop singleton for live mint activity, then confirms each
@@ -50,6 +51,13 @@ export type SeaDropDiscoveryConfig = { chainKey: string; rpcUrls: string[]; conf
  * (address-less) log queries — see block-source.ts's doc comment for that background.
  * Runs alongside whatever DISCOVERY_MODE is configured, not instead of it: this only
  * catches SeaDrop-launched collections (a large share of real drops, not all of them).
+ *
+ * A contract only emits SeaDropMint when *someone else* mints it — a drop can be free
+ * and open right now with nobody minting it in this particular scan's block window, and
+ * without `registry` it would never resurface until its next mint. `registry`, when
+ * given, remembers every contract ever seen here and re-checks all of them on every
+ * scan (in addition to whatever's newly minting), so a known-but-currently-quiet drop
+ * keeps being offered for as long as it stays free and open.
  */
 export class SeaDropDiscoverySource implements DiscoverySource {
   readonly name = "seadrop";
@@ -80,17 +88,21 @@ export class SeaDropDiscoverySource implements DiscoverySource {
 
     const logs = await client.getLogs({ address: SEADROP_ADDRESS, event: SEADROP_MINT_EVENT, fromBlock, toBlock });
 
-    const contracts = new Set<Address>();
+    const registryKey = this.config.chainKey;
+    const newlySeen = new Set<Address>();
     for (const log of logs) {
-      if (log.args.nftContract) contracts.add(log.args.nftContract);
+      if (log.args.nftContract) newlySeen.add(log.args.nftContract);
     }
+    const known = this.config.registry ? await this.config.registry.list(registryKey) : [];
+    const contracts = new Set<Address>([...known, ...newlySeen]);
 
     const candidates: MintCandidate[] = [];
     for (const nftContract of contracts) {
       const candidate = await this.candidateFor(client, nftContract);
       if (candidate) candidates.push(candidate);
     }
-    console.log(`[${this.config.chainKey}] seadrop: scanned blocks ${fromBlock}-${toBlock}, ${logs.length} mint event(s), ${contracts.size} contract(s) seen, ${candidates.length} currently free+open`);
+    if (this.config.registry) for (const contract of newlySeen) await this.config.registry.add(registryKey, contract);
+    console.log(`[${this.config.chainKey}] seadrop: scanned blocks ${fromBlock}-${toBlock}, ${logs.length} mint event(s), ${newlySeen.size} new + ${known.length} known contract(s) checked, ${candidates.length} currently free+open`);
 
     if (this.config.cursor) await this.config.cursor.set(cursorKey, toBlock);
     return candidates;

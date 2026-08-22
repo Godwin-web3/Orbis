@@ -14,6 +14,7 @@ import {
   SupabaseAutoMintLog,
   SupabaseBlockCursorStore,
   SupabaseCandidateStore,
+  SupabaseContractRegistry,
   SupabasePreparedTransactionStore,
   SupabaseUserKeyStore,
   SupabaseUserRegistry,
@@ -82,6 +83,7 @@ async function buildBot(env: Env, db: SupabaseClient): Promise<TelegramCommandBo
         preparedStore: prepared,
         notifications: [new ConsoleNotificationSink()],
         blockCursor: new SupabaseBlockCursorStore(db),
+        contractRegistry: new SupabaseContractRegistry(db),
       });
       const result = await engine.run();
       return result.count;
@@ -96,6 +98,7 @@ async function buildBot(env: Env, db: SupabaseClient): Promise<TelegramCommandBo
         preparedStore: prepared,
         notifications: [new ConsoleNotificationSink()],
         blockCursor: new SupabaseBlockCursorStore(db),
+        contractRegistry: new SupabaseContractRegistry(db),
         chainKeys: [resolved.chainKey],
       });
       return processTarget(engine, urlsFor(resolved.chainKey), resolved);
@@ -123,6 +126,7 @@ async function runScheduledPass(env: Env): Promise<void> {
       preparedStore,
       notifications: [new ConsoleNotificationSink()],
       blockCursor: new SupabaseBlockCursorStore(db),
+      contractRegistry: new SupabaseContractRegistry(db),
     });
     await engine.run();
   } catch (error) {
