@@ -4,7 +4,7 @@ import { DefaultOpportunityEngine } from "../src/core/opportunity";
 import { FixtureSimulator } from "../src/simulation/fixture";
 import { DefaultPolicyEngine } from "../src/execution/policy";
 import { MintEngine } from "../src/app/engine";
-import type { CandidateStore, NotificationSink } from "../src/domain/ports";
+import type { CandidateStore, ContractInspector, NotificationSink } from "../src/domain/ports";
 import type { MintCandidate } from "../src/domain/types";
 
 describe("free mint pipeline", () => {
@@ -46,5 +46,46 @@ describe("free mint pipeline", () => {
     // survived as a string, not thrown "Do not know how to serialize a BigInt".
     const parsed = JSON.parse(sent[0]);
     expect(parsed.candidate.valueWei).toBe("0");
+  });
+
+  test("skips the generic inspector chain for a self-sufficient candidate that already has calldata (regression: SeaDrop candidates were burning ~9 wasted RPC calls each via EvmEligibilityInspector, checking the wrong contract, blowing Cloudflare's 50-subrequest budget)", async () => {
+    let inspectCalls = 0;
+    const inspector: ContractInspector = { inspect: async (candidate) => { inspectCalls++; return candidate; } };
+    const candidate: MintCandidate = { id: "demo-4", chainKey: "ethereum", contract: "0x00005EA00Ac477B1030CE78506496e8C2dE24bf5", source: "seadrop", discoveredAt: new Date().toISOString(), mintFunction: "mintPublic", calldata: "0x1234", valueWei: 0n, active: true, eligible: true, metadata: { assetType: "nft", seadrop: true } };
+    const store: CandidateStore = { save: async () => {}, list: async () => [] };
+    const engine = new MintEngine({
+      sources: [],
+      classifier: new RuleClassifier(),
+      opportunities: new DefaultOpportunityEngine(),
+      simulator: new FixtureSimulator(),
+      policy: new DefaultPolicyEngine(),
+      store,
+      notifications: { send: async () => {} },
+      inspector,
+    });
+
+    await engine.processOne(candidate);
+    expect(inspectCalls).toBe(0);
+  });
+
+  test("still runs the inspector chain for a candidate discovered without calldata", async () => {
+    let inspectCalls = 0;
+    const inspector: ContractInspector = { inspect: async (candidate) => { inspectCalls++; return candidate; } };
+    const candidate: MintCandidate = { id: "demo-5", chainKey: "base", contract: "0x0000000000000000000000000000000000000001", source: "block-contracts", discoveredAt: new Date().toISOString(), mintFunction: "mint", valueWei: 0n, metadata: { assetType: "nft" } };
+    const store: CandidateStore = { save: async () => {}, list: async () => [] };
+    const engine = new MintEngine({
+      sources: [],
+      classifier: new RuleClassifier(),
+      opportunities: new DefaultOpportunityEngine(),
+      simulator: new FixtureSimulator(),
+      policy: new DefaultPolicyEngine(),
+      store,
+      notifications: { send: async () => {} },
+      inspector,
+      calldata: { build: async (c) => ({ chainKey: c.chainKey, to: c.contract, data: "0xabcd" as `0x${string}`, value: c.valueWei }) },
+    });
+
+    await engine.processOne(candidate);
+    expect(inspectCalls).toBe(1);
   });
 });
