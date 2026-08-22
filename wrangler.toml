@@ -25,11 +25,15 @@ crons = ["*/2 * * * *"]
 # every var read via process.env in src/ works here too once nodejs_compat bridges
 # these into process.env (see worker/index.ts's populateProcessEnv).
 [vars]
-ENABLED_CHAINS = "base"
+ENABLED_CHAINS = "robinhood,ethereum"
 DISCOVERY_MODE = "contracts"
 MAX_GAS_NATIVE = "0.005"
 MIN_EXPECTED_VALUE_NATIVE = "0"
 MAX_MINTS_PER_OPPORTUNITY = "1"
 AUTO_MINT_MAX_PER_USER_PER_SCAN = "1"
 AUTO_MINT_MAX_TOTAL_PER_SCAN = "10"
-# BASE_RPC_URL = "https://your-rpc.example"   # add the RPC URL for each enabled chain
+# Set these as Runtime variables in the dashboard (Settings > Variables and secrets),
+# not here and not in the Build section — see config/chains.ts for the rpcEnv name
+# each chain key maps to.
+# ROBINHOOD_RPC_URL = "https://your-rpc.example"
+# ETHEREUM_RPC_URL = "https://your-rpc.example"
