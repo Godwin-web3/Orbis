@@ -9,6 +9,11 @@ const MINT_SELECTOR = encodeFunctionData({
 }).slice(2, 10);
 const MINT_BYTECODE = `0x${"00".repeat(10)}${MINT_SELECTOR}${"00".repeat(10)}` as `0x${string}`;
 
+// ERC-721 Transfer: tokenId indexed -> 4 topics (topic0 + 3 indexed args), empty data.
+const ERC721_TOPICS = ["0xTransferSig", "0xfromZero", "0xto", "0xtokenId"];
+// ERC-20 Transfer: same topic0, but value is NOT indexed -> only 3 topics, value in data.
+const ERC20_TOPICS = ["0xTransferSig", "0xfromZero", "0xto"];
+
 function memCursor(): BlockCursorStore {
   const store = new Map<string, bigint>();
   return {
@@ -17,14 +22,17 @@ function memCursor(): BlockCursorStore {
   };
 }
 
-function fakeClient(opts: { latest: bigint; logAddresses?: `0x${string}`[]; getLogsShouldThrowOnce?: boolean }): PublicClient {
+function fakeClient(opts: { latest: bigint; logAddresses?: `0x${string}`[]; topics?: string[]; getLogsShouldThrowOnce?: boolean; getLogsAlwaysThrows?: boolean; blockTransactions?: unknown[]; receipts?: Record<string, { contractAddress?: `0x${string}` }> }): PublicClient {
   let threw = false;
   return {
     getBlockNumber: async () => opts.latest,
     getLogs: async ({ toBlock }: { fromBlock: bigint; toBlock: bigint }) => {
+      if (opts.getLogsAlwaysThrows) throw new Error("Please specify an address in your request");
       if (opts.getLogsShouldThrowOnce && !threw) { threw = true; throw new Error("range too large"); }
-      return (opts.logAddresses ?? []).map((address) => ({ address, blockNumber: toBlock }));
+      return (opts.logAddresses ?? []).map((address) => ({ address, blockNumber: toBlock, topics: opts.topics ?? ERC721_TOPICS, data: "0x" }));
     },
+    getBlock: async () => ({ transactions: opts.blockTransactions ?? [] }),
+    getTransactionReceipt: async ({ hash }: { hash: string }) => opts.receipts?.[hash] ?? {},
     getBytecode: async () => MINT_BYTECODE,
   } as unknown as PublicClient;
 }
@@ -43,6 +51,14 @@ describe("BlockContractDiscoverySource", () => {
     expect(await cursor.get("base")).toBe(998n); // safeLatest = latest - confirmations
   });
 
+  test("ignores ERC-20 Transfer events (same topic0, but tokenId not indexed)", async () => {
+    const cursor = memCursor();
+    const contract = "0x0000000000000000000000000000000000000009" as `0x${string}`;
+    const client = fakeClient({ latest: 1000n, logAddresses: [contract], topics: ERC20_TOPICS });
+    const source = new BlockContractDiscoverySource({ chainKey: "base", rpcUrls: [], client, cursor, confirmations: 2n });
+    expect(await source.discover()).toEqual([]);
+  });
+
   test("second scan resumes from cursor + 1, not the fixed recent window", async () => {
     const cursor = memCursor();
     await cursor.set("base", 500n);
@@ -52,7 +68,7 @@ describe("BlockContractDiscoverySource", () => {
     let capturedFrom: bigint | undefined;
     const spyClient = {
       ...client,
-      getLogs: async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) => { capturedFrom = fromBlock; return []; },
+      getLogs: async ({ fromBlock }: { fromBlock: bigint; toBlock: bigint }) => { capturedFrom = fromBlock; return []; },
     } as unknown as PublicClient;
     const spySource = new BlockContractDiscoverySource({ chainKey: "base", rpcUrls: [], client: spyClient, cursor, confirmations: 2n });
     await spySource.discover();
@@ -64,7 +80,7 @@ describe("BlockContractDiscoverySource", () => {
     const contract = "0x0000000000000000000000000000000000000002" as `0x${string}`;
     const client = {
       getBlockNumber: async () => 1000n,
-      getLogs: async () => [{ address: contract, blockNumber: 998n }],
+      getLogs: async () => [{ address: contract, blockNumber: 998n, topics: ERC721_TOPICS, data: "0x" }],
       getBytecode: async () => "0x00" as `0x${string}`,
     } as unknown as PublicClient;
     const source = new BlockContractDiscoverySource({ chainKey: "base", rpcUrls: [], client, cursor, confirmations: 2n });
@@ -78,6 +94,21 @@ describe("BlockContractDiscoverySource", () => {
     const source = new BlockContractDiscoverySource({ chainKey: "base", rpcUrls: [], client, cursor, confirmations: 2n });
     const candidates = await source.discover();
     expect(candidates.length).toBeGreaterThan(0);
+  });
+
+  test("falls back to a new-contract scan when the provider refuses address-less getLogs entirely", async () => {
+    const cursor = memCursor();
+    const contract = "0x0000000000000000000000000000000000000005" as `0x${string}`;
+    const client = fakeClient({
+      latest: 1000n,
+      getLogsAlwaysThrows: true,
+      blockTransactions: [{ hash: "0xabc", to: null }],
+      receipts: { "0xabc": { contractAddress: contract } },
+    });
+    const source = new BlockContractDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, confirmations: 2n });
+    const candidates = await source.discover();
+    expect(candidates.length).toBeGreaterThan(0);
+    expect(candidates[0].contract).toBe(contract);
   });
 
   test("returns nothing once caught up (fromBlock past safeLatest)", async () => {
