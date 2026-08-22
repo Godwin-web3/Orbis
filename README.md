@@ -83,7 +83,9 @@ It hard-refuses any chain other than Sepolia (chain id `11155111`) and aborts if
 
 ## Telegram command bot
 
-`scripts/telegram-bot.ts` runs a long-polling bot that puts a human in the loop for every live broadcast. The engine scans, simulates, and prepares approved mints automatically; it only signs and broadcasts on an explicit `/mint` from an authorized chat. This is the intended path for mainnet: no black-box auto-broadcasting.
+`scripts/telegram-bot.ts` runs a long-polling bot that puts a human in the loop for every live broadcast by default. The engine scans, simulates, and prepares approved mints automatically; it signs and broadcasts on an explicit `/mint` (or, if a user opts into autonomous mode — see below — on its own). This is the intended path for mainnet: no black-box auto-broadcasting unless a user has explicitly turned it on for themselves.
+
+Registration, `/mint`, `/sign`, `/submit`, and the `/auto*` commands are open to **any** chat — this is the multi-user surface. `/scan`, `/mint-all`, and `/ack` are restricted to `TELEGRAM_ADMIN_IDS` because they cost RPC/gas on every run or arm live broadcasting bot-wide; an unauthorized chat gets "This command is restricted to the bot operator."
 
 ```sh
 # create a bot via @BotFather and paste its token
@@ -101,15 +103,19 @@ Commands:
 | `/help` | List commands |
 | `/status` | Wallet, fleet size, chains, execution guard state, registered users, prepared-mint count |
 | `/register <address>` | Set the receive address for this chat — free mints via `/mint` land here; no private key needed |
-| `/scan` | Run a discovery + simulation + prepare pass over enabled chains |
+| `/scan` **[admin]** | Run a discovery + simulation + prepare pass over enabled chains |
 | `/prepared` | List mints approved by policy that are ready to broadcast |
 | `/mint <index>` | Mint to YOUR registered address: a fleet wallet mints (pays gas), then transfers the NFT to you |
 | `/sign <index>` | Build the EXACT transaction for your wallet to sign — non-custodial, your key stays on your device |
 | `/submit <signed-raw-tx>` | Relay a transaction you signed in your own wallet; the NFT lands in your wallet |
-| `/mint-all` | Batch-broadcast every prepared mint in a single EIP-7702 transaction per chain (needs `BATCH_EXECUTOR_ADDRESS`) |
-| `/ack <on\|off>` | Enable/disable the live-execution guard (persisted to `GUARD_STATE_PATH`) |
+| `/mint-all` **[admin]** | Batch-broadcast every prepared mint in a single EIP-7702 transaction per chain (needs `BATCH_EXECUTOR_ADDRESS`) |
+| `/ack <on\|off>` **[admin]** | Enable/disable the live-execution guard (persisted to `GUARD_STATE_PATH`) — also the master switch autonomous auto-mint depends on |
+| `/autokey <privatekey>` | Register YOUR OWN burner wallet key (DM only) so the bot can auto-mint for you unattended — see [Autonomous auto-mint](#autonomous-auto-mint-opt-in-per-user) |
+| `/auto <on\|off>` | Turn your personal auto-mint on/off. Off by default; requires `/autokey` first |
+| `/autostatus` | Your burner wallet address and auto-mint state |
+| `/forgetkey` | Delete your stored burner wallet key and disable auto-mint |
 
-Before every `/mint`, `RpcExecutor` (`src/execution/executor.ts`) re-reads on-chain state and aborts unless the mint is still free, still open, the per-address limit is not reached, and the wallet can afford gas. It only broadcasts after those checks pass. The bot only honors commands from `TELEGRAM_ADMIN_IDS`.
+Before every `/mint`, `RpcExecutor` (`src/execution/executor.ts`) re-reads on-chain state and aborts unless the mint is still free, still open, the per-address limit is not reached, and the wallet can afford gas. It only broadcasts after those checks pass. `/scan`, `/mint-all`, and `/ack` only honor `TELEGRAM_ADMIN_IDS`; every other command is open to any chat.
 
 `/mint-all` groups prepared mints by chain and sends them through one EIP-7702 authorization per chain: the batch groups each prepared mint's calldata into a single `execute((to,value,data)[])` call against `BATCH_EXECUTOR_ADDRESS`, the wallet signs a `[chainId, batchExecutor, nonce]` authorization delegating to that contract, and the authorized transaction is broadcast from the wallet's own address. Each mint is still re-checked against `guardAgainstStaleMint` before being batched. Set `BATCH_EXECUTOR_ADDRESS` to the deployed 7702 batch-delegate contract; without it, `/mint-all` refuses to run.
 
@@ -153,6 +159,34 @@ USER_REGISTRY_PATH=data/users.jsonl
 bun run telegram-bot
 ```
 
+## Autonomous auto-mint (opt-in, per-user)
+
+By default nothing broadcasts without an explicit `/mint`. Any user can additionally opt themselves into **autonomous** minting: the bot scans on an interval and mints for them without a command, even while they're not there. This is a third execution model alongside the non-custodial and fleet-relay paths above — each user supplies and controls their **own** key, so it doesn't touch fleet wallets or the operator's `EXECUTION_PRIVATE_KEY`.
+
+```text
+/autokey <burner-privatekey>   →  bot encrypts and stores the key (DM only)
+/auto on                       →  opt in; OFF is always the default
+[unattended] every scan pass   →  bot signs + broadcasts YOUR policy-approved mints from YOUR key
+/auto off | /forgetkey         →  opt out / delete the key at any time
+```
+
+Mechanics (`src/execution/automint.ts`, `src/users/keystore.ts`):
+
+1. `/autokey <privatekey>` derives the address with viem and stores the key AES-256-GCM-encrypted (`AUTO_MINT_ENCRYPTION_KEY`, 32 random bytes — `openssl rand -hex 32`) in `AUTO_MINT_KEYSTORE_PATH`. The bot best-effort deletes the Telegram message containing the raw key; you should also delete it yourself. **Use a burner wallet with only what you're willing to lose — this is a hot key held by the bot's server.**
+2. `/auto on` opts the chat in. `AutoMintLoop` runs on `AUTO_MINT_SCAN_INTERVAL_MS` (default 2 min): for each opted-in user it builds an `RpcExecutor` from their decrypted key and attempts every `PASS` opportunity they haven't been tried against yet, re-verifying free/open/limit/gas exactly like a manual `/mint` would.
+3. Every `(user, opportunity)` pair is attempted **at most once** — recorded in `AUTO_MINT_LOG_PATH` — win or lose, so a permanently-failing mint doesn't get retried and re-spend gas every interval.
+4. Two caps bound the blast radius of running unattended: `AUTO_MINT_MAX_PER_USER_PER_SCAN` (default 1) and `AUTO_MINT_MAX_TOTAL_PER_SCAN` (default 10) across all users, per scan pass.
+5. The operator's `/ack on` guard is still a hard prerequisite — autonomous mode never broadcasts while the guard is off, same as manual `/mint`.
+6. Leave `AUTO_MINT_ENCRYPTION_KEY` unset to disable the feature entirely; `/autokey`, `/auto`, `/autostatus`, and `/forgetkey` will all say so instead of doing anything.
+
+```sh
+AUTO_MINT_ENCRYPTION_KEY=$(openssl rand -hex 32)
+AUTO_MINT_SCAN_INTERVAL_MS=120000
+AUTO_MINT_MAX_PER_USER_PER_SCAN=1
+AUTO_MINT_MAX_TOTAL_PER_SCAN=10
+bun run telegram-bot
+```
+
 ## Two-mode architectureThe system runs as two separate Telegram bots that share the same engine. The split keeps **public broadcast** (zero secrets, safe to expose) separate from **private execution** (your funded wallet key, locked to your DM).
 
 **1. Public discovery bot** (`scripts/discovery-bot.ts`) — broadcast-only, **no private key required**. It continuously scans enabled chains on an interval, and for every policy-approved free mint it posts an alert to a public channel with the collection, chain, contract address, an explorer mint link, and a "connect your wallet and mint" call-to-action. Users mint with their **own** wallets — you never hold their funds. Runs on a scan interval (`SCAN_INTERVAL_MS`, default `120000`), and dedupes already-alerted mints via `data/alerted.jsonl` so it never spams the same one.
@@ -168,4 +202,4 @@ bun run discovery-bot
 
 It only ever reads: discovery, classification, simulation, and policy. It never signs or broadcasts — there is nothing to lose if it's public.
 
-**2. Private command bot** (`scripts/telegram-bot.ts`) — owner-only. This is the auto-mint path: hold your funded wallet key (`EXECUTION_PRIVATE_KEY`), run `/ack on` once, then every `/mint <index>` re-verifies the mint is still free/open/within limit, signs, broadcasts, and confirms ownership — all in one click. It only honors commands from `TELEGRAM_ADMIN_IDS`, so your wallet stays in your DM.
+**2. Private command bot** (`scripts/telegram-bot.ts`) — the execution surface. Hold your funded wallet key (`EXECUTION_PRIVATE_KEY`), run `/ack on` once, then every `/mint <index>` re-verifies the mint is still free/open/within limit, signs, broadcasts, and confirms ownership — all in one click. If you configure a `FLEET_PRIVATE_KEYS` relay or `AUTO_MINT_ENCRYPTION_KEY`, other users can `/register`/`/mint` or opt into their own autonomous mints through this same bot without touching your `EXECUTION_PRIVATE_KEY` — see [Multi-user relay](#multi-user-relay-custodial-no-user-keys) and [Autonomous auto-mint](#autonomous-auto-mint-opt-in-per-user). `/scan`, `/mint-all`, and `/ack` stay restricted to `TELEGRAM_ADMIN_IDS`; if no fleet is configured, `/mint` (which would otherwise spend your own key) is restricted too.

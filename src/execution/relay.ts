@@ -20,6 +20,8 @@ export type RelayResult = { user: Address; mintWallet: Address; mintTx: Address;
  */
 export class WalletFleet {
   private readonly wallets: FleetWallet[] = [];
+  private readonly reserved = new Set<Address>();
+  private selectQueue: Promise<unknown> = Promise.resolve();
 
   constructor(keys: string[]) {
     for (const key of keys) {
@@ -32,19 +34,37 @@ export class WalletFleet {
   get addresses(): Address[] { return this.wallets.map((wallet) => wallet.address); }
   get size(): number { return this.wallets.length; }
 
-  /** Round-robin pick a wallet that still has per-address headroom on the mint contract. */
-  async pickFor(chainId: number, contract: Address, maxPerWallet: bigint): Promise<FleetWallet | null> {
-    const publicClient = this.publicClient(chainId);
-    for (const wallet of this.wallets) {
-      let owned = 0n;
-      try {
-        owned = (await publicClient.readContract({ address: contract, abi: MINTER_ABI, functionName: "balanceOf", args: [wallet.address] })) as bigint;
-      } catch {
-        owned = 0n;
+  /**
+   * Atomically picks a wallet with per-address headroom on the mint contract and
+   * marks it reserved so no concurrent caller can pick the same wallet before this
+   * one finishes. Callers MUST call `release` when done (success or failure).
+   * Selection is serialized through `selectQueue` so two concurrent /mint calls
+   * can't both read stale on-chain balances and pick the same wallet.
+   */
+  async reserve(chainId: number, contract: Address, maxPerWallet: bigint): Promise<FleetWallet | null> {
+    const run = this.selectQueue.then(async () => {
+      const publicClient = this.publicClient(chainId);
+      for (const wallet of this.wallets) {
+        if (this.reserved.has(wallet.address)) continue;
+        let owned = 0n;
+        try {
+          owned = (await publicClient.readContract({ address: contract, abi: MINTER_ABI, functionName: "balanceOf", args: [wallet.address] })) as bigint;
+        } catch {
+          owned = 0n;
+        }
+        if (maxPerWallet === 0n || owned < maxPerWallet) {
+          this.reserved.add(wallet.address);
+          return wallet;
+        }
       }
-      if (maxPerWallet === 0n || owned < maxPerWallet) return wallet;
-    }
-    return null;
+      return null;
+    });
+    this.selectQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  release(address: Address): void {
+    this.reserved.delete(address);
   }
 
   private readonly publicClients = new Map<number, PublicClient>();
@@ -86,35 +106,43 @@ export class MintRelay {
       ? (await publicClient.readContract({ address: prepared.to, abi: prepared.abi as unknown[], functionName: "MAX_LIMIT_PER_PUBLIC_ADDRS" })) as bigint
       : 0n;
 
-    const mintWallet = await this.fleet.pickFor(chainId, prepared.to, maxPerWallet);
+    const mintWallet = await this.fleet.reserve(chainId, prepared.to, maxPerWallet);
     if (!mintWallet) throw new Error("No fleet wallet has per-address headroom on this mint contract.");
 
-    await this.guardAgainstStaleMint(publicClient, prepared, mintWallet.address);
+    try {
+      await this.guardAgainstStaleMint(publicClient, prepared, mintWallet.address);
 
-    const balanceBefore = (await publicClient.readContract({ address: prepared.to, abi: prepared.abi as unknown[], functionName: "balanceOf", args: [mintWallet.address] })) as bigint;
+      const balanceBefore = (await publicClient.readContract({ address: prepared.to, abi: prepared.abi as unknown[], functionName: "balanceOf", args: [mintWallet.address] })) as bigint;
 
-    const gas = prepared.gas > 0n ? prepared.gas : 200_000n;
-    const gasPrice = await publicClient.getGasPrice();
-    const estCost = gas * gasPrice;
-    const balance = await publicClient.getBalance({ address: mintWallet.address });
-    if (balance < estCost) throw new Error(`Fleet wallet ${mintWallet.address} lacks gas (need ${estCost}, have ${balance}).`);
+      const gas = prepared.gas > 0n ? prepared.gas : 200_000n;
+      const gasPrice = await publicClient.getGasPrice();
+      const estCost = gas * gasPrice;
+      const balance = await publicClient.getBalance({ address: mintWallet.address });
+      if (balance < estCost) throw new Error(`Fleet wallet ${mintWallet.address} lacks gas (need ${estCost}, have ${balance}).`);
 
-    const mintTx = await mintWallet.wallet.sendTransaction({ account: mintWallet.account, chain, to: prepared.to, data: prepared.data, value: prepared.value, gas });
+      // Reservation guarantees no other concurrent caller touches this wallet, so a
+      // single nonce fetch here (incremented locally for the second send) is safe.
+      let nonce = await publicClient.getTransactionCount({ address: mintWallet.address, blockTag: "pending" });
 
-    const receipt = await publicClient.waitForTransactionReceipt({ hash: mintTx, timeout: 120_000 });
-    if (receipt.status !== "success") throw new Error(`Mint tx failed (status=${receipt.status}).`);
+      const mintTx = await mintWallet.wallet.sendTransaction({ account: mintWallet.account, chain, to: prepared.to, data: prepared.data, value: prepared.value, gas, nonce: nonce++ });
 
-    const balanceAfter = (await publicClient.readContract({ address: prepared.to, abi: prepared.abi as unknown[], functionName: "balanceOf", args: [mintWallet.address] })) as bigint;
-    if (balanceAfter <= balanceBefore) throw new Error("Mint succeeded but no NFT was received by the fleet wallet.");
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: mintTx, timeout: 120_000 });
+      if (receipt.status !== "success") throw new Error(`Mint tx failed (status=${receipt.status}).`);
 
-    const index = balanceBefore;
-    const tokenId = (await publicClient.readContract({ address: prepared.to, abi: ERC721_ABI, functionName: "tokenOfOwnerByIndex", args: [mintWallet.address, index] })) as bigint;
+      const balanceAfter = (await publicClient.readContract({ address: prepared.to, abi: prepared.abi as unknown[], functionName: "balanceOf", args: [mintWallet.address] })) as bigint;
+      if (balanceAfter <= balanceBefore) throw new Error("Mint succeeded but no NFT was received by the fleet wallet.");
 
-    const transferData = encodeFunctionData({ abi: ERC721_ABI, functionName: "safeTransferFrom", args: [mintWallet.address, user, tokenId] });
-    const transferTx = await mintWallet.wallet.sendTransaction({ account: mintWallet.account, chain, to: prepared.to, data: transferData, value: 0n });
+      const index = balanceBefore;
+      const tokenId = (await publicClient.readContract({ address: prepared.to, abi: ERC721_ABI, functionName: "tokenOfOwnerByIndex", args: [mintWallet.address, index] })) as bigint;
 
-    const result: RelayResult = { user, mintWallet: mintWallet.address, mintTx, tokenId, transferTx };
-    return result;
+      const transferData = encodeFunctionData({ abi: ERC721_ABI, functionName: "safeTransferFrom", args: [mintWallet.address, user, tokenId] });
+      const transferTx = await mintWallet.wallet.sendTransaction({ account: mintWallet.account, chain, to: prepared.to, data: transferData, value: 0n, nonce: nonce++ });
+
+      const result: RelayResult = { user, mintWallet: mintWallet.address, mintTx, tokenId, transferTx };
+      return result;
+    } finally {
+      this.fleet.release(mintWallet.address);
+    }
   }
 
   private async guardAgainstStaleMint(publicClient: PublicClient, prepared: PreparedTransaction, from: Address): Promise<void> {
