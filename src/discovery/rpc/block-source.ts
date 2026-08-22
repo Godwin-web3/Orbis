@@ -41,7 +41,9 @@ export class BlockContractDiscoverySource implements DiscoverySource {
     for (const client of this.clients) {
       try {
         return await this.discoverWith(client);
-      } catch {}
+      } catch (error) {
+        console.error(`[${this.config.chainKey}] block discovery failed:`, (error as Error).message);
+      }
     }
     return [];
   }
@@ -52,19 +54,24 @@ export class BlockContractDiscoverySource implements DiscoverySource {
     const stored = this.config.cursor ? await this.config.cursor.get(this.config.chainKey) : undefined;
     const defaultStart = safeLatest > 20n ? safeLatest - 20n : 0n;
     const fromBlock = this.config.startBlock ?? (stored !== undefined && stored + 1n <= safeLatest ? stored + 1n : defaultStart);
-    if (fromBlock > safeLatest) return [];
+    if (fromBlock > safeLatest) {
+      console.log(`[${this.config.chainKey}] block discovery: caught up (cursor ${stored ?? "none"}, safeLatest ${safeLatest}), nothing to scan yet`);
+      return [];
+    }
 
     let toBlock = capRange(fromBlock, safeLatest, MAX_BLOCK_RANGE);
     let logs;
     try {
       logs = await client.getLogs({ event: TRANSFER_EVENT, args: { from: ZERO_ADDRESS }, fromBlock, toBlock });
-    } catch {
+    } catch (error) {
+      console.error(`[${this.config.chainKey}] getLogs failed for range ${fromBlock}-${toBlock}, retrying smaller:`, (error as Error).message);
       toBlock = capRange(fromBlock, safeLatest, RETRY_BLOCK_RANGE);
       logs = await client.getLogs({ event: TRANSFER_EVENT, args: { from: ZERO_ADDRESS }, fromBlock, toBlock });
     }
 
     const contracts = new Set<Address>();
     for (const log of logs) contracts.add(log.address);
+    console.log(`[${this.config.chainKey}] scanned blocks ${fromBlock}-${toBlock}: ${logs.length} mint-transfer log(s), ${contracts.size} distinct contract(s)`);
 
     const candidates: MintCandidate[] = [];
     for (const contract of contracts) {
