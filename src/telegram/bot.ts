@@ -2,8 +2,12 @@ import type { PreparedTransactionStore } from "../domain/ports";
 import type { PreparedTransaction } from "../domain/types";
 import type { RpcExecutor } from "../execution/executor";
 import type { UserRegistry } from "../users/registry";
+import type { UserKeyStore } from "../users/keystore";
 import type { MintRelay } from "../execution/relay";
 import type { NonCustodialRelay } from "../execution/noncustodial";
+
+/** Commands that broadcast fleet-wide, spend the operator's own key, or cost RPC/gas on every user's behalf — restricted to TELEGRAM_ADMIN_IDS. Everything else is open to any chat. */
+export const ADMIN_ONLY_COMMANDS = new Set(["scan", "ack", "mint-all", "mintall"]);
 
 export type ParsedCommand = { command: string; args: string[] };
 export function parseCommand(text: string): ParsedCommand | null {
@@ -36,6 +40,7 @@ export class TelegramCommandBot {
       relay?: MintRelay;
       nonCustodial?: NonCustodialRelay;
       users: UserRegistry;
+      keystore?: UserKeyStore;
       guard: { get(): boolean; set(value: boolean): Promise<void> };
       scan: () => Promise<number>;
       chainsEnabled: string[];
@@ -59,7 +64,10 @@ export class TelegramCommandBot {
 
   private authorized(chatId: string): boolean { return this.allowedChatIds.includes(chatId); }
 
-  async handleCommand(chatId: string, parsed: ParsedCommand): Promise<string> {
+  /** Public wrapper so background loops (e.g. AutoMintLoop) can message a user's chat. */
+  async sendTo(chatId: string, text: string): Promise<void> { return this.send(chatId, text); }
+
+  async handleCommand(chatId: string, parsed: ParsedCommand, meta: { messageId?: number; chatType?: string } = {}): Promise<string> {
     switch (parsed.command) {
       case "help": return this.help();
       case "status": return this.status();
@@ -71,6 +79,10 @@ export class TelegramCommandBot {
       case "submit": return this.submit(chatId, parsed.args);
       case "mint-all": case "mintall": return this.mintAll();
       case "ack": return this.ack(parsed.args);
+      case "autokey": return this.autokey(chatId, parsed.args, meta);
+      case "auto": return this.auto(chatId, parsed.args);
+      case "autostatus": return this.autostatus(chatId);
+      case "forgetkey": return this.forgetkey(chatId);
       default: return `Unknown command /${parsed.command}. Send /help.`;
     }
   }
@@ -85,23 +97,30 @@ export class TelegramCommandBot {
       "/mint <index> — mint to YOUR registered address (re-verifies free/open/limit)",
       "/sign <index> — build the EXACT transaction for your wallet to sign (non-custodial; you keep your key)",
       "/submit <signed-raw-tx> — relay a tx you signed in your own wallet; the NFT lands in your wallet",
-      "/mint-all — batch-broadcast ALL prepared mints in one EIP-7702 tx per chain",
-      "/ack <on|off> — enable/disable live execution guard",
+      "/mint-all — batch-broadcast ALL prepared mints in one EIP-7702 tx per chain [admin]",
+      "/ack <on|off> — enable/disable live execution guard [admin]",
+      "/autokey <privatekey> — register YOUR OWN burner wallet so the bot can auto-mint for you unattended (DM only; use a burner, never your main wallet)",
+      "/auto <on|off> — turn your personal auto-mint on/off (off by default, requires /autokey first)",
+      "/autostatus — your burner wallet address and auto-mint state",
+      "/forgetkey — delete your stored burner wallet key and disable auto-mint",
       "/help — this message",
       "",
-      "Broadcast only happens on an explicit /mint. The guard must be ON.",
+      "Manual broadcast only happens on an explicit /mint, and only while the operator's guard is ON.",
+      "Auto-mint only acts on YOUR OWN key, only for opportunities that already passed policy, and only while the operator's guard is ON.",
     ].join("\n");
   }
 
   private async status(): Promise<string> {
     const prepared = await this.deps.prepared.list();
     const users = await this.deps.users.list();
+    const autoUsers = this.deps.keystore ? (await this.deps.keystore.listEnabled()).length : 0;
     const lines = [
       "Free Mint Engine — status",
       `chains: ${this.deps.chainsEnabled.join(", ") || "none"}`,
       `fleet wallets: ${this.deps.relay ? this.deps.relay.fleetSize : 0} · executor: ${this.deps.executor?.address ?? "(none)"}`,
       `guard: ${this.deps.guard.get() ? "ON" : "OFF"}`,
       `registered users: ${users.length}`,
+      `auto-mint opted in: ${this.deps.keystore ? `${autoUsers} user(s)` : "disabled (operator hasn't configured AUTO_MINT_ENCRYPTION_KEY)"}`,
       `prepared mints: ${prepared.filter((tx) => tx.policy === "PASS").length} PASS / ${prepared.length} total`,
     ];
     return lines.join("\n");
@@ -157,6 +176,9 @@ export class TelegramCommandBot {
         ].join("\n");
       }
       if (!this.deps.executor) return "No executor configured. Set EXECUTION_PRIVATE_KEY (or a relay fleet).";
+      // No fleet configured means this mints straight from the operator's own funded
+      // key with no per-user benefit — keep it admin-only so a stranger can't drain it.
+      if (!this.authorized(chatId)) return "This bot has no relay fleet configured, so /mint would spend the operator's own wallet. Restricted to the operator.";
       const { txHash } = await this.deps.executor.execute(tx);
       const receipt = await this.deps.executor.verify(txHash, tx);
       return [
@@ -239,6 +261,50 @@ export class TelegramCommandBot {
     }
   }
 
+  private async autokey(chatId: string, args: string[], meta: { messageId?: number; chatType?: string }): Promise<string> {
+    if (!this.deps.keystore) return "Auto-mint isn't enabled on this bot (operator hasn't configured AUTO_MINT_ENCRYPTION_KEY).";
+    if (meta.chatType && meta.chatType !== "private") return "For your safety, run /autokey in a private DM with this bot, not a group chat.";
+    const key = args[0];
+    if (!key || !/^0x[0-9a-fA-F]{64}$/.test(key)) return "Usage: /autokey <0x-private-key>. Use a burner wallet with minimal funds — never your main wallet.";
+    try {
+      const address = await this.deps.keystore.setKey(chatId, key as `0x${string}`);
+      if (meta.messageId !== undefined) this.api("deleteMessage", { chat_id: chatId, message_id: meta.messageId }).catch(() => {});
+      return [
+        `Burner wallet registered: ${address}`,
+        "Auto-mint is OFF by default — run /auto on to enable it.",
+        "I tried to delete the message containing your key; please also delete it yourself if it's still visible in this chat.",
+        "Fund this address with only what you're willing to lose. Once /auto is on, it will sign and broadcast for policy-approved mints without asking you first.",
+      ].join("\n");
+    } catch (error) {
+      return `Could not save key: ${(error as Error).message}`;
+    }
+  }
+
+  private async auto(chatId: string, args: string[]): Promise<string> {
+    if (!this.deps.keystore) return "Auto-mint isn't enabled on this bot.";
+    const value = args[0]?.toLowerCase();
+    if (value !== "on" && value !== "off") return "Usage: /auto <on|off>";
+    if (value === "on" && !(await this.deps.keystore.hasKey(chatId))) return "Register a burner wallet first with /autokey <privatekey>.";
+    await this.deps.keystore.setAutoMint(chatId, value === "on");
+    return value === "on"
+      ? "Auto-mint is now ON. Policy-approved free mints will be signed and broadcast from your burner wallet automatically — no further action needed from you."
+      : "Auto-mint is now OFF.";
+  }
+
+  private async autostatus(chatId: string): Promise<string> {
+    if (!this.deps.keystore) return "Auto-mint isn't enabled on this bot.";
+    const address = await this.deps.keystore.addressFor(chatId);
+    if (!address) return "No burner wallet registered. Use /autokey <privatekey>.";
+    const enabled = await this.deps.keystore.isAutoMintEnabled(chatId);
+    return `Burner wallet: ${address}\nAuto-mint: ${enabled ? "ON" : "OFF"}`;
+  }
+
+  private async forgetkey(chatId: string): Promise<string> {
+    if (!this.deps.keystore) return "Auto-mint isn't enabled on this bot.";
+    await this.deps.keystore.removeKey(chatId);
+    return "Burner wallet key deleted and auto-mint disabled.";
+  }
+
   private async ack(args: string[]): Promise<string> {
     const value = args[0]?.toLowerCase();
     if (value !== "on" && value !== "off") return "Usage: /ack <on|off>";
@@ -249,17 +315,20 @@ export class TelegramCommandBot {
   async run(): Promise<void> {
     while (!this.stop) {
       try {
-        const result = await this.api("getUpdates", { offset: this.offset, timeout: 50 }) as { result: { update_id: number; message?: { chat: { id: number }; text?: string } }[] };
+        const result = await this.api("getUpdates", { offset: this.offset, timeout: 50 }) as { result: { update_id: number; message?: { message_id: number; chat: { id: number; type?: string }; text?: string } }[] };
         for (const update of result.result ?? []) {
           this.offset = update.update_id + 1;
           const message = update.message;
           if (!message?.text) continue;
           const chatId = String(message.chat.id);
-          if (!this.authorized(chatId)) continue;
           const parsed = parseCommand(message.text);
           if (!parsed) continue;
+          if (ADMIN_ONLY_COMMANDS.has(parsed.command) && !this.authorized(chatId)) {
+            await this.send(chatId, "This command is restricted to the bot operator.");
+            continue;
+          }
           try {
-            const reply = await this.handleCommand(chatId, parsed);
+            const reply = await this.handleCommand(chatId, parsed, { messageId: message.message_id, chatType: message.chat.type });
             await this.send(chatId, reply);
           } catch (error) {
             await this.send(chatId, `ERROR: ${(error as Error).message}`);

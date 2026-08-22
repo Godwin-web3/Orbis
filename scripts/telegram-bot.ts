@@ -5,7 +5,9 @@ import { JsonlPreparedTransactionStore } from "../src/execution/prepared";
 import { RpcExecutor } from "../src/execution/executor";
 import { WalletFleet, MintRelay } from "../src/execution/relay";
 import { NonCustodialRelay } from "../src/execution/noncustodial";
+import { AutoMintLoop, JsonlAutoMintLog } from "../src/execution/automint";
 import { JsonlUserRegistry } from "../src/users/registry";
+import { JsonlUserKeyStore, parseEncryptionKey } from "../src/users/keystore";
 import { TelegramCommandBot } from "../src/telegram/bot";
 import { enabledChains } from "../config/chains";
 
@@ -41,12 +43,18 @@ async function main() {
   let guardEnabled = await loadGuard();
   const guard = { get: () => guardEnabled, set: async (value: boolean) => { guardEnabled = value; await saveGuard(value); } };
 
+  const encryptionKeyHex = process.env.AUTO_MINT_ENCRYPTION_KEY ?? "";
+  const keystore = encryptionKeyHex
+    ? new JsonlUserKeyStore(process.env.AUTO_MINT_KEYSTORE_PATH ?? "data/automint-keys.jsonl", parseEncryptionKey(encryptionKeyHex))
+    : undefined;
+
   const bot = new TelegramCommandBot(token, allowed, {
     prepared,
     executor,
     relay,
     nonCustodial,
     users,
+    keystore,
     chainsEnabled,
     guard,
     scan: async () => {
@@ -56,7 +64,26 @@ async function main() {
     },
   });
 
-  console.log(`Telegram bot started. Authorized chats: ${allowed.join(", ")}. Relay fleet: ${relay?.fleet.size ?? 0} wallet(s). Executor: ${executor?.address ?? "(none)"}`);
+  let autoMintLoop: AutoMintLoop | undefined;
+  if (keystore) {
+    autoMintLoop = new AutoMintLoop({
+      prepared,
+      keystore,
+      guard,
+      log: new JsonlAutoMintLog(process.env.AUTO_MINT_LOG_PATH ?? "data/automint-log.jsonl"),
+      caps: {
+        maxPerUserPerScan: Number(process.env.AUTO_MINT_MAX_PER_USER_PER_SCAN ?? "1"),
+        maxTotalPerScan: Number(process.env.AUTO_MINT_MAX_TOTAL_PER_SCAN ?? "10"),
+      },
+      notify: (userId, text) => bot.sendTo(userId, text),
+      onError: (error) => console.error("Auto-mint loop error:", (error as Error).message),
+    });
+    autoMintLoop.start(Number(process.env.AUTO_MINT_SCAN_INTERVAL_MS ?? "120000"));
+  }
+
+  console.log(
+    `Telegram bot started. Authorized chats: ${allowed.join(", ")}. Relay fleet: ${relay?.fleet.size ?? 0} wallet(s). Executor: ${executor?.address ?? "(none)"}. Auto-mint: ${autoMintLoop ? "enabled (users opt in with /autokey + /auto on)" : "disabled (set AUTO_MINT_ENCRYPTION_KEY to enable)"}`,
+  );
   await bot.run();
 }
 
