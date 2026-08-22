@@ -239,6 +239,8 @@ BATCH_EXECUTOR_ADDRESS       # optional, needed for /mint-all
 ```
 Plain (non-secret) config — RPC URLs, `ENABLED_CHAINS`, contract lists, policy thresholds — goes in `wrangler.toml`'s `[vars]` block; see `.env.example` for the full list, since every `process.env.*` read in `src/` works identically here (bridged in by `populateProcessEnv()` in `worker/index.ts`, which requires the `nodejs_compat` flag already set in `wrangler.toml`).
 
+A key declared in `[vars]` gets overwritten back to its committed value on *every* deploy — `keep_vars = true` only protects keys that aren't declared there at all. So an RPC URL you want to manage from the dashboard (e.g. a private Alchemy/QuickNode endpoint you don't want in a public repo) must not also appear in `wrangler.toml`'s `[vars]`, or your dashboard edit gets silently reverted the next time you deploy.
+
 **3. Deploy and point Telegram at it:**
 ```sh
 bunx wrangler login

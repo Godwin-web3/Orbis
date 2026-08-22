@@ -46,8 +46,15 @@ const SEADROP_ABI = [
 
 const MAX_BLOCK_RANGE = 50n;
 const ETHERSCAN_BLOCK_RANGE = 5000n;
+// Cloudflare Workers' free plan caps a single invocation at 50 external subrequests
+// total (RPC calls, Etherscan, Supabase — everything), shared across every discovery
+// source for every enabled chain in that one scan. Re-checking a contract costs 1-2 of
+// those (getPublicDrop, +getAllowedFeeRecipients if restricted), so re-checking the full
+// registry every pass doesn't scale once it grows past a few dozen contracts. Capped
+// here; the rest rotate in over subsequent scans (see the offset persisted via `cursor`).
+const DEFAULT_MAX_REGISTRY_RECHECK = 15;
 
-export type SeaDropDiscoveryConfig = { chainKey: string; rpcUrls: string[]; confirmations?: bigint; client?: PublicClient; cursor?: BlockCursorStore; registry?: ContractRegistry; quantity?: number; etherscan?: { apiKey: string; chainId: number } };
+export type SeaDropDiscoveryConfig = { chainKey: string; rpcUrls: string[]; confirmations?: bigint; client?: PublicClient; cursor?: BlockCursorStore; registry?: ContractRegistry; quantity?: number; etherscan?: { apiKey: string; chainId: number }; maxRegistryRecheck?: number };
 
 /**
  * Watches OpenSea's SeaDrop singleton for live mint activity, then confirms each
@@ -62,9 +69,10 @@ export type SeaDropDiscoveryConfig = { chainKey: string; rpcUrls: string[]; conf
  * A contract only emits SeaDropMint when *someone else* mints it — a drop can be free
  * and open right now with nobody minting it in this particular scan's block window, and
  * without `registry` it would never resurface until its next mint. `registry`, when
- * given, remembers every contract ever seen here and re-checks all of them on every
- * scan (in addition to whatever's newly minting), so a known-but-currently-quiet drop
- * keeps being offered for as long as it stays free and open.
+ * given, remembers every contract ever seen here and re-checks a rotating, bounded batch
+ * of them on every scan (in addition to whatever's newly minting — see rotateBatch), so a
+ * known-but-currently-quiet drop keeps being offered for as long as it stays free and
+ * open, without the per-scan subrequest count growing unbounded as the registry does.
  *
  * `etherscan`, when given, fetches the log scan via Etherscan's API instead of a raw
  * eth_getLogs call and widens the per-scan range from 50 to 5000 blocks — real SeaDrop
@@ -118,7 +126,8 @@ export class SeaDropDiscoverySource implements DiscoverySource {
       }
     }
     const known = this.config.registry ? await this.config.registry.list(registryKey) : [];
-    const contracts = new Set<Address>([...known, ...newlySeen]);
+    const knownBatch = await this.rotateBatch(known, newlySeen);
+    const contracts = new Set<Address>([...knownBatch, ...newlySeen]);
 
     const candidates: MintCandidate[] = [];
     for (const nftContract of contracts) {
@@ -126,10 +135,24 @@ export class SeaDropDiscoverySource implements DiscoverySource {
       if (candidate) candidates.push(candidate);
     }
     if (this.config.registry) for (const contract of newlySeen) await this.config.registry.add(registryKey, contract);
-    console.log(`[${this.config.chainKey}] seadrop: scanned blocks ${fromBlock}-${toBlock}, ${eventCount} mint event(s), ${newlySeen.size} new + ${known.length} known contract(s) checked, ${candidates.length} currently free+open`);
+    console.log(`[${this.config.chainKey}] seadrop: scanned blocks ${fromBlock}-${toBlock}, ${eventCount} mint event(s), ${newlySeen.size} new + ${knownBatch.length}/${known.length} known contract(s) checked, ${candidates.length} currently free+open`);
 
     if (this.config.cursor) await this.config.cursor.set(cursorKey, toBlock);
     return candidates;
+  }
+
+  /** Picks a bounded, rotating slice of `known` to re-check this pass (excluding anything already covered by `newlySeen`), so registry re-checks stay within subrequest budget regardless of how large the registry grows. Advances and persists the rotation offset via `cursor` so every known contract gets revisited over successive scans. */
+  private async rotateBatch(known: Address[], newlySeen: Set<Address>): Promise<Address[]> {
+    const pending = known.filter((address) => !newlySeen.has(address));
+    const limit = this.config.maxRegistryRecheck ?? DEFAULT_MAX_REGISTRY_RECHECK;
+    if (pending.length <= limit) return pending;
+
+    const offsetKey = `seadrop-rotation:${this.config.chainKey}`;
+    const stored = this.config.cursor ? await this.config.cursor.get(offsetKey) : undefined;
+    const offset = Number(stored ?? 0n) % pending.length;
+    const batch = [...pending.slice(offset), ...pending.slice(0, offset)].slice(0, limit);
+    if (this.config.cursor) await this.config.cursor.set(offsetKey, BigInt((offset + limit) % pending.length));
+    return batch;
   }
 
   private async candidateFor(client: PublicClient, nftContract: Address): Promise<MintCandidate | undefined> {

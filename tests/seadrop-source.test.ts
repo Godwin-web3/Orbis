@@ -252,4 +252,35 @@ describe("SeaDropDiscoverySource", () => {
     expect(url.searchParams.get("toBlock")).toBe("6000");
     expect(url.searchParams.get("address")).toBe(SEADROP_ADDRESS);
   });
+
+  test("caps registry re-checks per scan instead of checking a large registry in full (Cloudflare's 50-subrequest budget)", async () => {
+    const cursor = memCursor();
+    const contracts = Array.from({ length: 30 }, (_, i) => `0x${(i + 1).toString(16).padStart(40, "0")}` as Address);
+    const registry = memRegistry({ ethereum: contracts });
+    let checked = 0;
+    const client = fakeClient({ latest: 1000n, drops: Object.fromEntries(contracts.map((c) => [c, freeOpenDrop()])) });
+    const originalReadContract = (client as any).readContract;
+    (client as any).readContract = async (args: any) => { checked++; return originalReadContract(args); };
+    const source = new SeaDropDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, registry, confirmations: 2n, maxRegistryRecheck: 5 });
+
+    const candidates = await source.discover();
+    expect(candidates.length).toBe(5);
+    expect(checked).toBe(5);
+  });
+
+  test("rotates which contracts get re-checked across successive scans so every known contract eventually gets covered", async () => {
+    const cursor = memCursor();
+    const contracts = Array.from({ length: 10 }, (_, i) => `0x${(i + 1).toString(16).padStart(40, "0")}` as Address);
+    const registry = memRegistry({ ethereum: contracts });
+    const client = fakeClient({ latest: 1000n, drops: Object.fromEntries(contracts.map((c) => [c, freeOpenDrop()])) });
+    const source = new SeaDropDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, registry, confirmations: 2n, maxRegistryRecheck: 4 });
+
+    const seen = new Set<string>();
+    for (let pass = 0; pass < 3; pass++) {
+      const candidates = await source.discover();
+      for (const c of candidates) seen.add(c.metadata.nftContract as string);
+    }
+    // 3 passes x 4 per pass = 12 checks against 10 contracts — every one should have come up at least once.
+    expect(seen.size).toBe(10);
+  });
 });

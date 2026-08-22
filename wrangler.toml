@@ -41,9 +41,15 @@ MIN_EXPECTED_VALUE_NATIVE = "0"
 MAX_MINTS_PER_OPPORTUNITY = "1"
 AUTO_MINT_MAX_PER_USER_PER_SCAN = "1"
 AUTO_MINT_MAX_TOTAL_PER_SCAN = "10"
-# Public, no-signup RPC endpoints as a working default — verified reachable. Rate-limited
-# under heavy polling; swap in a dedicated provider (Alchemy/QuickNode) by editing these
-# values directly (now safe from being wiped by a deploy — see keep_vars above) or via
-# the dashboard's Runtime variables if you'd rather not commit the change.
-ROBINHOOD_RPC_URL = "https://rpc.mainnet.chain.robinhood.com"
+# Public, no-signup RPC endpoint as a working default — verified reachable, rate-limited
+# under heavy polling. Swap in a dedicated provider by editing this value directly (safe
+# from being wiped by a deploy — see keep_vars above).
+#
+# IMPORTANT: a key declared here is NOT the same as one added via the dashboard's Runtime
+# variables — keep_vars only protects UNDECLARED keys from being wiped; a key that's
+# declared here gets overwritten back to this committed value on every deploy, even if
+# you edited it in the dashboard in between. So don't declare a key here once you're
+# managing it via the dashboard instead (e.g. ROBINHOOD_RPC_URL, deliberately left out
+# below since it's set via the dashboard to a private provider URL not meant for a public
+# repo — see the "Serverless deployment" section of the README).
 ETHEREUM_RPC_URL = "https://ethereum-rpc.publicnode.com"
