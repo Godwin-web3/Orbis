@@ -3,11 +3,13 @@ main = "worker/index.ts"
 compatibility_date = "2026-08-01"
 compatibility_flags = ["nodejs_compat"]
 
-# Every 2 minutes: discovery+simulation+prepare pass, then an auto-mint attempt pass
-# for opted-in users. Adjust to taste — this is the serverless equivalent of
-# AUTO_MINT_SCAN_INTERVAL_MS / scripts/discovery-bot.ts's SCAN_INTERVAL_MS.
+# Every 1 minute (Workers Cron's minimum granularity): discovery+simulation+prepare
+# pass, then an auto-mint attempt pass for opted-in users. This is the serverless
+# equivalent of AUTO_MINT_SCAN_INTERVAL_MS / scripts/discovery-bot.ts's
+# SCAN_INTERVAL_MS. Faster polling raises RPC request volume against whatever's
+# configured in *_RPC_URL — watch for rate-limit errors on free/public endpoints.
 [triggers]
-crons = ["*/2 * * * *"]
+crons = ["* * * * *"]
 
 # Secrets (never put these here — set with `wrangler secret put <NAME>`):
 #   TELEGRAM_BOT_TOKEN
@@ -26,7 +28,7 @@ crons = ["*/2 * * * *"]
 # these into process.env (see worker/index.ts's populateProcessEnv).
 [vars]
 ENABLED_CHAINS = "robinhood,ethereum"
-DISCOVERY_MODE = "contracts"
+DISCOVERY_MODE = "blocks"
 MAX_GAS_NATIVE = "0.005"
 MIN_EXPECTED_VALUE_NATIVE = "0"
 MAX_MINTS_PER_OPPORTUNITY = "1"
