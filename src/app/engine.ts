@@ -31,9 +31,17 @@ export class MintEngine {
     let prepared: PreparedTransaction | undefined;
     if (decision.allowed && this.deps.preparer) prepared = await this.deps.preparer.prepare(candidate, opportunity, simulation, decision, request);
     const result = buildCandidateReport(candidate, classification, simulation, opportunity, decision, this.metrics.snapshot(candidate.id), prepared);
-    await this.deps.notifications.send(JSON.stringify(result));
+    await this.deps.notifications.send(stringifyReport(result));
     return result;
   }
 
   private requestFromCandidate(candidate: MintCandidate): TransactionRequest { if (!candidate.calldata) throw new Error(`candidate ${candidate.id} has no calldata`); return { chainKey: candidate.chainKey, to: candidate.contract, data: candidate.calldata, value: candidate.valueWei, from: candidate.from }; }
+}
+
+// The report embeds the raw candidate (valueWei: bigint) and, on a PASS, the prepared
+// transaction (value/gas/gasPriceWei: bigint) — plain JSON.stringify throws on those
+// ("Do not know how to serialize a BigInt"), so every bigint is stringified via a replacer
+// instead of chasing down each individual field.
+function stringifyReport(result: unknown): string {
+  return JSON.stringify(result, (_key, value) => (typeof value === "bigint" ? value.toString() : value));
 }
