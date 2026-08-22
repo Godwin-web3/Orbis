@@ -35,7 +35,7 @@ bun run typecheck
 TESTNET_CHAIN_KEY=base TESTNET_RPC_URL=https://your-testnet-rpc TESTNET_CONTRACT=0x... TESTNET_FROM=0x... TESTNET_MINT_FUNCTION=mint bun run testnet-probe
 ```
 
-The fixture path exercises the full pipeline without a wallet or chain. `testnet-probe` is the next safe step for one real testnet contract: it resolves the ABI, checks wallet eligibility, constructs calldata, runs `eth_estimateGas`/`eth_call`/optional tracing, scores policy, and writes a JSON report. It does not sign or broadcast. `live-readonly` uses configured RPC endpoints, discovers configured contracts (or recent deployments with `DISCOVERY_MODE=blocks`), inspects NFT interfaces, runs read-only simulation, persists candidates/events under `data/`, and never signs or broadcasts. Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` to enable alerts. `SIMULATION_FROM` is required for real RPC simulation because state-diff interpretation must be wallet-specific. Configure one or more comma-separated RPC URLs in each chain variable; the simulator rotates to a healthy provider when one fails.
+The fixture path exercises the full pipeline without a wallet or chain. `testnet-probe` is the next safe step for one real testnet contract: it resolves the ABI, checks wallet eligibility, constructs calldata, runs `eth_estimateGas`/`eth_call`/optional tracing, scores policy, and writes a JSON report. It does not sign or broadcast. `live-readonly` uses configured RPC endpoints, discovers configured contracts (or via `DISCOVERY_MODE=blocks`, described below), inspects NFT interfaces, runs read-only simulation, persists candidates/events under `data/`, and never signs or broadcasts. Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` to enable alerts. `SIMULATION_FROM` is required for real RPC simulation because state-diff interpretation must be wallet-specific. Configure one or more comma-separated RPC URLs in each chain variable; the simulator rotates to a healthy provider when one fails.
 
 ## Real RPC simulation
 
@@ -49,6 +49,11 @@ The fixture path exercises the full pipeline without a wallet or chain. `testnet
 When tracing is available, it extracts ERC-721/ERC-1155-style NFT transfers, ERC-20 transfers, approvals, approval-for-all calls, and nested external calls. A provider that supports `eth_call` but not tracing is still usable, but the result is marked without a state diff and should not pass a policy that requires proof of an NFT receipt.
 
 The simulator deliberately does not claim that a plain `eth_call` proves post-state. It records the limitation instead. A production deployment should use a fork or a tracing-capable provider for state-diff enforcement and add contract-specific decoding for Merkle proofs, signatures, proxy implementations, quotas, and time/block windows.
+
+## Discovery modes
+
+- `DISCOVERY_MODE=contracts` (default) — only checks the addresses you list in each chain's `*_CONTRACTS` env var.
+- `DISCOVERY_MODE=blocks` — auto-discovers mints without a curated list, by watching for **ERC-721 `Transfer` events where `from` is the zero address** (`src/discovery/rpc/block-source.ts`) — that event *is* a mint, emitted by any contract, new or deployed long ago, the moment someone mints from it. A single `eth_getLogs` call covers a whole block range per scan (capped at 50 blocks, retried at 10 on a provider error), and a persisted per-chain cursor (`BlockCursorStore` — JSONL file locally, Supabase's `kv_state` table on the Worker) tracks the last block scanned so consecutive scans cover contiguous ranges instead of missing everything between runs.
 
 ## Chain configuration
 
@@ -104,6 +109,7 @@ Commands:
 | `/status` | Wallet, fleet size, chains, execution guard state, registered users, prepared-mint count |
 | `/register <address>` | Set the receive address for this chat — free mints via `/mint` land here; no private key needed |
 | `/scan` **[admin]** | Run a discovery + simulation + prepare pass over enabled chains |
+| `/target <address-or-url>` | Check one specific contract you already know about — raw `0x` address, OpenSea asset URL, Zora URL, or a block explorer's address URL — through the same classify/simulate/policy pipeline as auto-discovery |
 | `/prepared` | List mints approved by policy that are ready to broadcast |
 | `/mint <index>` | Mint to YOUR registered address: a fleet wallet mints (pays gas), then transfers the NFT to you |
 | `/sign <index>` | Build the EXACT transaction for your wallet to sign — non-custodial, your key stays on your device |

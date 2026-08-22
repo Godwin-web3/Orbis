@@ -5,6 +5,7 @@ import type { Address, MintCandidate, PreparedTransaction } from "../domain/type
 import type { RegisteredUser, UserRegistry } from "../users/registry";
 import type { UserKeyStore } from "../users/keystore";
 import type { AutoMintAttempt, AutoMintLog } from "../execution/automint";
+import type { BlockCursorStore } from "../discovery/rpc/block-cursor";
 import { decryptSecret, encryptSecret } from "../users/crypto";
 
 /**
@@ -221,4 +222,21 @@ export async function loadGuardState(db: SupabaseClient): Promise<boolean> {
 export async function saveGuardState(db: SupabaseClient, enabled: boolean): Promise<void> {
   const { error } = await db.from("kv_state").upsert({ key: "guard", value: { enabled }, updated_at: new Date().toISOString() });
   if (error) throw new Error(`Supabase kv_state upsert failed: ${error.message}`);
+}
+
+/** Per-chain last-scanned-block cursor for BlockContractDiscoverySource, backed by the same generic kv_state table as the guard flag. */
+export class SupabaseBlockCursorStore implements BlockCursorStore {
+  constructor(private readonly db: SupabaseClient) {}
+
+  async get(chainKey: string): Promise<bigint | undefined> {
+    const { data, error } = await this.db.from("kv_state").select("value").eq("key", `block_cursor:${chainKey}`).maybeSingle();
+    if (error) throw new Error(`Supabase kv_state lookup failed: ${error.message}`);
+    const value = data?.value as { block?: string } | undefined;
+    return value?.block !== undefined ? BigInt(value.block) : undefined;
+  }
+
+  async set(chainKey: string, block: bigint): Promise<void> {
+    const { error } = await this.db.from("kv_state").upsert({ key: `block_cursor:${chainKey}`, value: { block: block.toString() }, updated_at: new Date().toISOString() });
+    if (error) throw new Error(`Supabase kv_state upsert failed: ${error.message}`);
+  }
 }

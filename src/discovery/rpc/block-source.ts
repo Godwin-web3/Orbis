@@ -1,10 +1,36 @@
-import { createPublicClient, http, type Address, type PublicClient } from "viem";
+import { createPublicClient, http, parseAbiItem, type Address, type PublicClient } from "viem";
 import type { DiscoverySource } from "../../domain/ports";
 import type { MintCandidate } from "../../domain/types";
-import { detectMintFunction } from "../contract/detector";
+import { detectMintFunction, identifyCandidate } from "../contract/detector";
+import type { BlockCursorStore } from "./block-cursor";
 
-export type BlockDiscoveryConfig = { chainKey: string; rpcUrls: string[]; startBlock?: bigint; confirmations?: bigint; client?: PublicClient };
+const TRANSFER_EVENT = parseAbiItem("event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)");
+const ZERO_ADDRESS: Address = "0x0000000000000000000000000000000000000000";
 
+// Per-scan block range caps. Conservative defaults since free/public RPC providers often
+// reject large eth_getLogs ranges; on failure we retry once with a much smaller range
+// rather than giving up the whole pass.
+const MAX_BLOCK_RANGE = 50n;
+const RETRY_BLOCK_RANGE = 10n;
+
+export type BlockDiscoveryConfig = { chainKey: string; rpcUrls: string[]; startBlock?: bigint; confirmations?: bigint; client?: PublicClient; cursor?: BlockCursorStore };
+
+function capRange(from: bigint, safeLatest: bigint, max: bigint): bigint {
+  const capped = from + max - 1n;
+  return capped < safeLatest ? capped : safeLatest;
+}
+
+/**
+ * Finds NFT mints by watching for ERC-721 `Transfer` events where `from` is the zero
+ * address — that IS a mint, emitted by any contract (new or deployed long ago) the
+ * moment someone mints from it. This catches mints from already-existing collections
+ * that just opened up, not just brand-new deployments, and a single eth_getLogs call
+ * covers a whole block range cheaply (unlike checking every transaction's receipt).
+ *
+ * A persisted cursor (see BlockCursorStore) tracks the last block scanned per chain so
+ * consecutive scans cover contiguous ranges instead of only sampling a fixed recent
+ * window each time and silently missing everything in between.
+ */
 export class BlockContractDiscoverySource implements DiscoverySource {
   readonly name = "block-contracts";
   constructor(private readonly config: BlockDiscoveryConfig) {}
@@ -12,28 +38,45 @@ export class BlockContractDiscoverySource implements DiscoverySource {
   private get clients(): PublicClient[] { return this.config.client ? [this.config.client] : this.config.rpcUrls.map((url) => createPublicClient({ transport: http(url) })); }
 
   async discover(): Promise<MintCandidate[]> {
-    const candidates: MintCandidate[] = [];
     for (const client of this.clients) {
       try {
-        const latest = await client.getBlockNumber();
-        const safeLatest = latest - (this.config.confirmations ?? 2n);
-        const fromBlock = this.config.startBlock ?? (safeLatest > 20n ? safeLatest - 20n : 0n);
-        if (safeLatest < fromBlock) continue;
-        const block = await client.getBlock({ blockNumber: safeLatest, includeTransactions: true });
-        for (const transaction of block.transactions) {
-          if (typeof transaction === "string" || !transaction.to) continue;
-          const receipt = await client.getTransactionReceipt({ hash: transaction.hash });
-          if (receipt.contractAddress) await this.addCandidate(client, receipt.contractAddress, candidates);
-        }
-        break;
+        return await this.discoverWith(client);
       } catch {}
     }
-    return candidates;
+    return [];
   }
 
-  private async addCandidate(client: PublicClient, contract: Address, candidates: MintCandidate[]) {
-    const bytecode = await client.getBytecode({ address: contract });
-    if (!bytecode) return;
-    for (const mintFunction of detectMintFunction(bytecode)) candidates.push({ id: `${this.config.chainKey}:${contract}:${mintFunction}`, chainKey: this.config.chainKey, contract, source: this.name, discoveredAt: new Date().toISOString(), mintFunction, valueWei: 0n, metadata: { assetType: "nft", bytecodeDetected: true, discoveredFromRecentDeployment: true } });
+  private async discoverWith(client: PublicClient): Promise<MintCandidate[]> {
+    const latest = await client.getBlockNumber();
+    const safeLatest = latest - (this.config.confirmations ?? 2n);
+    const stored = this.config.cursor ? await this.config.cursor.get(this.config.chainKey) : undefined;
+    const defaultStart = safeLatest > 20n ? safeLatest - 20n : 0n;
+    const fromBlock = this.config.startBlock ?? (stored !== undefined && stored + 1n <= safeLatest ? stored + 1n : defaultStart);
+    if (fromBlock > safeLatest) return [];
+
+    let toBlock = capRange(fromBlock, safeLatest, MAX_BLOCK_RANGE);
+    let logs;
+    try {
+      logs = await client.getLogs({ event: TRANSFER_EVENT, args: { from: ZERO_ADDRESS }, fromBlock, toBlock });
+    } catch {
+      toBlock = capRange(fromBlock, safeLatest, RETRY_BLOCK_RANGE);
+      logs = await client.getLogs({ event: TRANSFER_EVENT, args: { from: ZERO_ADDRESS }, fromBlock, toBlock });
+    }
+
+    const contracts = new Set<Address>();
+    for (const log of logs) contracts.add(log.address);
+
+    const candidates: MintCandidate[] = [];
+    for (const contract of contracts) {
+      const bytecode = await client.getBytecode({ address: contract });
+      if (!bytecode) continue;
+      for (const mintFunction of detectMintFunction(bytecode)) {
+        const candidate = identifyCandidate(contract, this.config.chainKey, this.name, mintFunction);
+        candidates.push({ ...candidate, metadata: { ...candidate.metadata, mintEventObserved: true } });
+      }
+    }
+
+    if (this.config.cursor) await this.config.cursor.set(this.config.chainKey, toBlock);
+    return candidates;
   }
 }

@@ -1,6 +1,6 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import { buildRuntime } from "../src/app/runtime";
+import { buildRuntime, urlsFor } from "../src/app/runtime";
 import { JsonlPreparedTransactionStore } from "../src/execution/prepared";
 import { RpcExecutor } from "../src/execution/executor";
 import { WalletFleet, MintRelay } from "../src/execution/relay";
@@ -9,6 +9,7 @@ import { AutoMintLoop, JsonlAutoMintLog } from "../src/execution/automint";
 import { JsonlUserRegistry } from "../src/users/registry";
 import { JsonlUserKeyStore, parseEncryptionKey } from "../src/users/keystore";
 import { TelegramCommandBot } from "../src/telegram/bot";
+import { parseTargetInput, processTarget } from "../src/discovery/target";
 import { enabledChains } from "../config/chains";
 
 const GUARD_PATH = process.env.GUARD_STATE_PATH ?? "data/guard.json";
@@ -61,6 +62,14 @@ async function main() {
       const engine = buildRuntime();
       const result = await engine.run();
       return result.count;
+    },
+    target: async (input: string) => {
+      const defaultChainKey = chainsEnabled[0];
+      const resolved = parseTargetInput(input, defaultChainKey);
+      if (!resolved) return "Couldn't figure out the chain/contract from that. Paste the raw 0x contract address, or use an OpenSea asset, Zora, or block-explorer URL.";
+      if (!chainsEnabled.includes(resolved.chainKey)) return `Chain "${resolved.chainKey}" isn't enabled. Enabled: ${chainsEnabled.join(", ") || "none"}.`;
+      const engine = buildRuntime({ chainKeys: [resolved.chainKey] });
+      return processTarget(engine, urlsFor(resolved.chainKey), resolved);
     },
   });
 

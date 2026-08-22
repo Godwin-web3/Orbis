@@ -43,6 +43,8 @@ export class TelegramCommandBot {
       keystore?: UserKeyStore;
       guard: { get(): boolean; set(value: boolean): Promise<void> };
       scan: () => Promise<number>;
+      /** Resolves a pasted contract address or URL and runs it through the same classify/simulate/policy pipeline as auto-discovery. */
+      target?: (input: string) => Promise<string>;
       chainsEnabled: string[];
     },
   ) {}
@@ -73,6 +75,7 @@ export class TelegramCommandBot {
       case "status": return this.status();
       case "register": return this.register(chatId, parsed.args);
       case "scan": return this.scan();
+      case "target": return this.target(parsed.args);
       case "prepared": return this.prepared();
       case "mint": return this.mint(chatId, parsed.args);
       case "sign": return this.sign(chatId, parsed.args);
@@ -93,6 +96,7 @@ export class TelegramCommandBot {
       "/register <address> — set the wallet this chat receives NFTs in (no private key needed)",
       "/status — wallet, chains, guard, registered users, prepared count",
       "/scan — run a discovery+simulation+prepare pass",
+      "/target <address-or-url> — check one specific contract (raw 0x address, OpenSea/Zora/explorer URL) and run it through the same safety pipeline as auto-discovery",
       "/prepared — list mints ready to broadcast",
       "/mint <index> — mint to YOUR registered address (re-verifies free/open/limit)",
       "/sign <index> — build the EXACT transaction for your wallet to sign (non-custodial; you keep your key)",
@@ -144,6 +148,17 @@ export class TelegramCommandBot {
       lines.push(`${pass.length} approved mint(s) ready:`, pass.map((tx, i) => formatPrepared(tx, prepared.indexOf(tx))).join("\n"));
     }
     return lines.join("\n");
+  }
+
+  private async target(args: string[]): Promise<string> {
+    if (!this.deps.target) return "Target checking isn't wired up on this bot.";
+    const input = args.join(" ").trim();
+    if (!input) return "Usage: /target <0x-address, OpenSea asset URL, Zora URL, or explorer address URL>";
+    try {
+      return await this.deps.target(input);
+    } catch (error) {
+      return `TARGET CHECK FAILED: ${(error as Error).message}`;
+    }
   }
 
   private async prepared(): Promise<string> {

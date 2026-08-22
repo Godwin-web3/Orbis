@@ -1,16 +1,18 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { buildRuntime } from "../src/app/runtime";
+import { buildRuntime, urlsFor } from "../src/app/runtime";
 import { RpcExecutor } from "../src/execution/executor";
 import { WalletFleet, MintRelay } from "../src/execution/relay";
 import { NonCustodialRelay } from "../src/execution/noncustodial";
 import { AutoMintLoop } from "../src/execution/automint";
 import { ConsoleNotificationSink } from "../src/notifications/console";
 import { parseEncryptionKey } from "../src/users/crypto";
+import { parseTargetInput, processTarget } from "../src/discovery/target";
 import {
   createSupabaseClient,
   loadGuardState,
   saveGuardState,
   SupabaseAutoMintLog,
+  SupabaseBlockCursorStore,
   SupabaseCandidateStore,
   SupabasePreparedTransactionStore,
   SupabaseUserKeyStore,
@@ -79,9 +81,24 @@ async function buildBot(env: Env, db: SupabaseClient): Promise<TelegramCommandBo
         candidateStore: new SupabaseCandidateStore(db),
         preparedStore: prepared,
         notifications: [new ConsoleNotificationSink()],
+        blockCursor: new SupabaseBlockCursorStore(db),
       });
       const result = await engine.run();
       return result.count;
+    },
+    target: async (input: string) => {
+      const defaultChainKey = chainsEnabled[0];
+      const resolved = parseTargetInput(input, defaultChainKey);
+      if (!resolved) return "Couldn't figure out the chain/contract from that. Paste the raw 0x contract address, or use an OpenSea asset, Zora, or block-explorer URL.";
+      if (!chainsEnabled.includes(resolved.chainKey)) return `Chain "${resolved.chainKey}" isn't enabled. Enabled: ${chainsEnabled.join(", ") || "none"}.`;
+      const engine = buildRuntime({
+        candidateStore: new SupabaseCandidateStore(db),
+        preparedStore: prepared,
+        notifications: [new ConsoleNotificationSink()],
+        blockCursor: new SupabaseBlockCursorStore(db),
+        chainKeys: [resolved.chainKey],
+      });
+      return processTarget(engine, urlsFor(resolved.chainKey), resolved);
     },
   });
 }
@@ -105,6 +122,7 @@ async function runScheduledPass(env: Env): Promise<void> {
       candidateStore: new SupabaseCandidateStore(db),
       preparedStore,
       notifications: [new ConsoleNotificationSink()],
+      blockCursor: new SupabaseBlockCursorStore(db),
     });
     await engine.run();
   } catch (error) {
