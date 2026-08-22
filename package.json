@@ -9,18 +9,27 @@
     "dry-run": "ENGINE_MODE=dry-run bun run src/index.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
+    "worker:typecheck": "tsc --noEmit -p worker/tsconfig.json",
     "testnet-probe": "bun run scripts/testnet-probe.ts",
     "execute": "bun run scripts/execute.ts",
     "telegram-bot": "bun run scripts/telegram-bot.ts",
-    "discovery-bot": "bun run scripts/discovery-bot.ts"
+    "discovery-bot": "bun run scripts/discovery-bot.ts",
+    "set-webhook": "bun run scripts/set-webhook.ts",
+    "delete-webhook": "bun run scripts/delete-webhook.ts",
+    "worker:dev": "wrangler dev",
+    "worker:deploy": "wrangler deploy"
   },
   "dependencies": {
-    "viem": "latest"
+    "viem": "latest",
+    "@supabase/supabase-js": "^2"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4",
     "@types/bun": "latest",
+    "@types/node": "^26.2.0",
     "ganache": "^7.9.2",
     "solc": "^0.8.36",
-    "typescript": "latest"
+    "typescript": "latest",
+    "wrangler": "^4"
   }
 }

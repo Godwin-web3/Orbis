@@ -187,7 +187,54 @@ AUTO_MINT_MAX_TOTAL_PER_SCAN=10
 bun run telegram-bot
 ```
 
-## Two-mode architectureThe system runs as two separate Telegram bots that share the same engine. The split keeps **public broadcast** (zero secrets, safe to expose) separate from **private execution** (your funded wallet key, locked to your DM).
+## Serverless deployment (Cloudflare Workers + Supabase)
+
+`scripts/telegram-bot.ts` needs a process that's always running (long-polling) and a writable filesystem (`data/*.jsonl`). `worker/index.ts` is the same bot re-pointed at a **webhook** and **Postgres**, so it can run on Cloudflare's free tier with no server to keep alive:
+
+| | Always-on (`scripts/telegram-bot.ts`) | Serverless (`worker/index.ts`) |
+| --- | --- | --- |
+| Transport | Long-polling (`getUpdates`) | Telegram webhook → `POST /telegram-webhook` |
+| Storage | `data/*.jsonl` files | Supabase (Postgres) |
+| Scan / auto-mint interval | `setInterval` in the process | Cloudflare Cron Trigger (`scheduled()`), every 2 min by default |
+| Encryption | Web Crypto (`src/users/crypto.ts`) | same — portable to both |
+
+All the command logic (`src/telegram/bot.ts`), execution logic (`executor.ts`/`relay.ts`/`noncustodial.ts`/`automint.ts`), and the multi-user/autonomous features above are **unchanged** — only the storage adapters and the entrypoint differ. `src/storage/supabase.ts` implements the same ports (`UserRegistry`, `UserKeyStore`, `PreparedTransactionStore`, `CandidateStore`, `AutoMintLog`) as their `Jsonl*` counterparts.
+
+**1. Database.** Apply `supabase/migrations/20260822000000_orbis_bot_storage.sql` to a Supabase project (`supabase db push`, or paste it into the SQL editor). This session already provisioned one for Orbis:
+```
+project: orbis (spxobcjspromgfmchmyj)
+url:     https://spxobcjspromgfmchmyj.supabase.co
+```
+Grab the **service_role** key from that project's Settings → API in the Supabase dashboard (deliberately not something any automated tool hands out) — the Worker authenticates as service_role, since these tables have RLS enabled with no policies (default-deny for the publishable/anon key).
+
+**2. Secrets** (`wrangler secret put <NAME>`, one at a time — never committed):
+```
+TELEGRAM_BOT_TOKEN
+TELEGRAM_ADMIN_IDS
+TELEGRAM_WEBHOOK_SECRET      # openssl rand -hex 32 — verifies webhook calls are really from Telegram
+SUPABASE_URL
+SUPABASE_SERVICE_ROLE_KEY
+AUTO_MINT_ENCRYPTION_KEY     # optional, enables /autokey — openssl rand -hex 32
+FLEET_PRIVATE_KEYS           # optional, enables the custodial relay
+EXECUTION_PRIVATE_KEY        # optional, operator's own single-key mint path
+BATCH_EXECUTOR_ADDRESS       # optional, needed for /mint-all
+```
+Plain (non-secret) config — RPC URLs, `ENABLED_CHAINS`, contract lists, policy thresholds — goes in `wrangler.toml`'s `[vars]` block; see `.env.example` for the full list, since every `process.env.*` read in `src/` works identically here (bridged in by `populateProcessEnv()` in `worker/index.ts`, which requires the `nodejs_compat` flag already set in `wrangler.toml`).
+
+**3. Deploy and point Telegram at it:**
+```sh
+bunx wrangler login
+bun run worker:deploy
+# copy the printed *.workers.dev URL, then:
+TELEGRAM_BOT_TOKEN=<token> WORKER_URL=https://orbis-telegram-bot.<subdomain>.workers.dev TELEGRAM_WEBHOOK_SECRET=<same as the secret above> bun run set-webhook
+```
+`bun run delete-webhook` switches Telegram back to no webhook (needed before going back to `bun run telegram-bot`'s long-polling — Telegram only delivers to one or the other). `bun run worker:typecheck` type-checks `worker/` against Workers' types instead of Bun's.
+
+**Constraints worth knowing:** Workers have no persistent process, so the scan/auto-mint interval is now a cron tick (1-minute minimum granularity) instead of `setInterval`; a full discovery pass across many chains/contracts should comfortably fit Workers' free-tier CPU-time limits since RPC round-trips are I/O wait (not billed), but a very large contract list is untested here — watch the Cloudflare dashboard's CPU-time metrics after your first few scheduled runs and trim `ENABLED_CHAINS`/`*_CONTRACTS` if you see timeouts.
+
+## Two-mode architecture
+
+The system runs as two separate Telegram bots that share the same engine. The split keeps **public broadcast** (zero secrets, safe to expose) separate from **private execution** (your funded wallet key, locked to your DM).
 
 **1. Public discovery bot** (`scripts/discovery-bot.ts`) — broadcast-only, **no private key required**. It continuously scans enabled chains on an interval, and for every policy-approved free mint it posts an alert to a public channel with the collection, chain, contract address, an explorer mint link, and a "connect your wallet and mint" call-to-action. Users mint with their **own** wallets — you never hold their funds. Runs on a scan interval (`SCAN_INTERVAL_MS`, default `120000`), and dedupes already-alerted mints via `data/alerted.jsonl` so it never spams the same one.
 
