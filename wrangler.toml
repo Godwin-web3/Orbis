@@ -3,6 +3,13 @@ main = "worker/index.ts"
 compatibility_date = "2026-08-01"
 compatibility_flags = ["nodejs_compat"]
 
+# Without this, every `wrangler deploy` treats [vars] below as the FULL authoritative
+# set and silently WIPES any plain variable added via the dashboard that isn't listed
+# here (secrets are unaffected). This bit us: ETHEREUM_RPC_URL/ROBINHOOD_RPC_URL were
+# added via the dashboard and got erased by the next few deploys, leaving discovery
+# with no RPC URL to scan and no error to show for it.
+keep_vars = true
+
 # Every 1 minute (Workers Cron's minimum granularity): discovery+simulation+prepare
 # pass, then an auto-mint attempt pass for opted-in users. This is the serverless
 # equivalent of AUTO_MINT_SCAN_INTERVAL_MS / scripts/discovery-bot.ts's
@@ -34,8 +41,9 @@ MIN_EXPECTED_VALUE_NATIVE = "0"
 MAX_MINTS_PER_OPPORTUNITY = "1"
 AUTO_MINT_MAX_PER_USER_PER_SCAN = "1"
 AUTO_MINT_MAX_TOTAL_PER_SCAN = "10"
-# Set these as Runtime variables in the dashboard (Settings > Variables and secrets),
-# not here and not in the Build section — see config/chains.ts for the rpcEnv name
-# each chain key maps to.
-# ROBINHOOD_RPC_URL = "https://your-rpc.example"
-# ETHEREUM_RPC_URL = "https://your-rpc.example"
+# Public, no-signup RPC endpoints as a working default — verified reachable. Rate-limited
+# under heavy polling; swap in a dedicated provider (Alchemy/QuickNode) by editing these
+# values directly (now safe from being wiped by a deploy — see keep_vars above) or via
+# the dashboard's Runtime variables if you'd rather not commit the change.
+ROBINHOOD_RPC_URL = "https://rpc.mainnet.chain.robinhood.com"
+ETHEREUM_RPC_URL = "https://ethereum-rpc.publicnode.com"
