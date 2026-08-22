@@ -1,0 +1,35 @@
+name = "orbis-telegram-bot"
+main = "worker/index.ts"
+compatibility_date = "2026-08-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Every 2 minutes: discovery+simulation+prepare pass, then an auto-mint attempt pass
+# for opted-in users. Adjust to taste — this is the serverless equivalent of
+# AUTO_MINT_SCAN_INTERVAL_MS / scripts/discovery-bot.ts's SCAN_INTERVAL_MS.
+[triggers]
+crons = ["*/2 * * * *"]
+
+# Secrets (never put these here — set with `wrangler secret put <NAME>`):
+#   TELEGRAM_BOT_TOKEN
+#   TELEGRAM_ADMIN_IDS
+#   TELEGRAM_WEBHOOK_SECRET      (generate with `openssl rand -hex 32`)
+#   SUPABASE_URL
+#   SUPABASE_SERVICE_ROLE_KEY    (service_role key — NOT the publishable/anon key)
+#   AUTO_MINT_ENCRYPTION_KEY     (optional — enables /autokey; `openssl rand -hex 32`)
+#   FLEET_PRIVATE_KEYS           (optional — enables the custodial relay)
+#   EXECUTION_PRIVATE_KEY        (optional — operator's own single-key mint path)
+#   BATCH_EXECUTOR_ADDRESS       (optional — needed for /mint-all)
+#
+# Plain config vars (non-secret) go under [vars] below — chain RPC URLs, enabled
+# chains, contract lists, policy thresholds, etc. See .env.example for the full list;
+# every var read via process.env in src/ works here too once nodejs_compat bridges
+# these into process.env (see worker/index.ts's populateProcessEnv).
+[vars]
+ENABLED_CHAINS = "base"
+DISCOVERY_MODE = "contracts"
+MAX_GAS_NATIVE = "0.005"
+MIN_EXPECTED_VALUE_NATIVE = "0"
+MAX_MINTS_PER_OPPORTUNITY = "1"
+AUTO_MINT_MAX_PER_USER_PER_SCAN = "1"
+AUTO_MINT_MAX_TOTAL_PER_SCAN = "10"
+# BASE_RPC_URL = "https://your-rpc.example"   # add the RPC URL for each enabled chain
