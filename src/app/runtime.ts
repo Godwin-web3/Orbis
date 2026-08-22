@@ -15,6 +15,7 @@ import { MintEngine } from "./engine";
 import { chains, enabledChains } from "../../config/chains";
 import type { CandidateStore, NotificationSink, PreparedTransactionStore } from "../domain/ports";
 import { JsonlBlockCursorStore, type BlockCursorStore } from "../discovery/rpc/block-cursor";
+import { SeaDropDiscoverySource } from "../discovery/rpc/seadrop-source";
 
 class CompositeInspector { constructor(private readonly inspectors: { inspect(candidate: import("../domain/types").MintCandidate): Promise<import("../domain/types").MintCandidate> }[]) {} async inspect(candidate: import("../domain/types").MintCandidate) { let result = candidate; for (const inspector of this.inspectors) result = await inspector.inspect(result); return result; } }
 
@@ -39,7 +40,11 @@ export function buildRuntime(overrides?: { candidateStore?: CandidateStore; prep
   const sources = activeChains.flatMap((chain) => {
     const rpcUrls = urlsFor(chain.key); if (!rpcUrls.length) return [];
     const contracts = (process.env[`${chain.key.toUpperCase()}_CONTRACTS`] ?? "").split(",").map((address) => address.trim()).filter(Boolean) as `0x${string}`[];
-    return [process.env.DISCOVERY_MODE === "blocks" ? new BlockContractDiscoverySource({ chainKey: chain.key, rpcUrls, confirmations: BigInt(process.env.CONFIRMATIONS ?? "2"), cursor: blockCursor }) : new EvmRpcDiscoverySource({ chainKey: chain.key, rpcUrls, contracts })];
+    const primary = process.env.DISCOVERY_MODE === "blocks" ? new BlockContractDiscoverySource({ chainKey: chain.key, rpcUrls, confirmations: BigInt(process.env.CONFIRMATIONS ?? "2"), cursor: blockCursor }) : new EvmRpcDiscoverySource({ chainKey: chain.key, rpcUrls, contracts });
+    // SeaDrop discovery runs alongside whatever DISCOVERY_MODE is configured — it only
+    // catches SeaDrop-launched collections, not a replacement for the general scanner.
+    const seadrop = process.env.SEADROP_DISCOVERY === "off" ? [] : [new SeaDropDiscoverySource({ chainKey: chain.key, rpcUrls, confirmations: BigInt(process.env.CONFIRMATIONS ?? "2"), cursor: blockCursor })];
+    return [primary, ...seadrop];
   });
   const clients = makeClients(chainUrls);
   const notifications = overrides?.notifications ?? [new ConsoleNotificationSink(), new JsonlNotificationSink(process.env.EVENT_LOG ?? "data/events.jsonl")];

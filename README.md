@@ -55,6 +55,10 @@ The simulator deliberately does not claim that a plain `eth_call` proves post-st
 - `DISCOVERY_MODE=contracts` (default) — only checks the addresses you list in each chain's `*_CONTRACTS` env var.
 - `DISCOVERY_MODE=blocks` — auto-discovers mints without a curated list, by watching for **ERC-721 `Transfer` events where `from` is the zero address** (`src/discovery/rpc/block-source.ts`) — that event *is* a mint, emitted by any contract, new or deployed long ago, the moment someone mints from it. A single `eth_getLogs` call covers a whole block range per scan (capped at 50 blocks, retried at 10 on a provider error), and a persisted per-chain cursor (`BlockCursorStore` — JSONL file locally, Supabase's `kv_state` table on the Worker) tracks the last block scanned so consecutive scans cover contiguous ranges instead of missing everything between runs.
 
+### SeaDrop discovery
+
+Runs alongside whichever `DISCOVERY_MODE` is configured (set `SEADROP_DISCOVERY=off` to disable it). `src/discovery/rpc/seadrop-source.ts` watches OpenSea's SeaDrop singleton contract (`0x00005EA00Ac477B1030CE78506496e8C2dE24bf5` — identical address on Ethereum, Base, and Robinhood Chain) for `SeaDropMint` events, then reads that contract's *current* `getPublicDrop()` config directly on-chain before surfacing a candidate — so a mint only surfaces while it is genuinely free and inside its open window, not just "something minted here recently." Because the query is scoped to the SeaDrop address it works within free RPC providers' restriction on address-less `eth_getLogs` calls. It pre-builds the exact `mintPublic(...)` calldata itself, so it only catches SeaDrop-launched collections — a large share of real free mints, but not all of them — which is why it runs as an addition, not a replacement.
+
 ## Chain configuration
 
 Configured network records include Ethereum, Base, Arbitrum, Optimism, Polygon, and Robinhood Chain. RPC URLs are supplied by environment variables; no public RPC endpoint is hardcoded. Robinhood Chain uses chain ID `4663` for mainnet and `46630` for testnet.
