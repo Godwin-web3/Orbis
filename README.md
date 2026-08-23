@@ -205,7 +205,38 @@ AUTO_MINT_MAX_TOTAL_PER_SCAN=10
 bun run telegram-bot
 ```
 
+## Persistent deployment (Render) — recommended
+
+Cloudflare Workers' free plan caps CPU time at **10ms per invocation** — real time spent waiting on RPC/API responses doesn't count against that, but the actual computation around them (ABI encoding, address checksum validation, JSON parsing, decoding responses) does, and a genuine multi-chain discovery pass routinely needs more than 10ms of that. Once discovery is finding real candidates, Cloudflare kills the invocation mid-scan (`"outcome": "exceededCpu"` in Observability) before it can reply or save anything. There's no reliable way to keep real on-chain verification work under a 10ms compute budget, so this deployment path exists for cases where a persistent process isn't an option; **Render's free tier is the recommended path** for the interactive bot.
+
+`scripts/render-bot.ts` is `scripts/telegram-bot.ts`'s command set, Supabase-backed instead of local JSONL files (a Background Worker's disk isn't guaranteed to survive a restart or redeploy), plus the periodic discovery-scan and auto-mint loops folded back in as plain `setInterval`s — a real, persistent process has no per-invocation CPU limit to design around.
+
+**Setup (Render dashboard → New → Background Worker):**
+1. Connect the `Godwin-web3/Orbis` GitHub repo.
+2. **Runtime:** Node. **Build Command:** `bun install`. **Start Command:** `bun run scripts/render-bot.ts`.
+3. **Instance type:** Free.
+4. Environment variables (Render dashboard → Environment) — same names as `.env.example`, minus anything webhook-specific:
+   ```
+   TELEGRAM_BOT_TOKEN
+   TELEGRAM_ADMIN_IDS
+   SUPABASE_URL
+   SUPABASE_SERVICE_ROLE_KEY
+   ENABLED_CHAINS, DISCOVERY_MODE, CONFIRMATIONS
+   ETHEREUM_RPC_URL, ROBINHOOD_RPC_URL (or whichever chains are enabled)
+   ETHERSCAN_API_KEY, ETHERSCAN_CHAINS
+   SIMULATION_FROM
+   MAX_GAS_NATIVE, MIN_EXPECTED_VALUE_NATIVE, MAX_MINTS_PER_OPPORTUNITY
+   AUTO_MINT_ENCRYPTION_KEY, AUTO_MINT_MAX_PER_USER_PER_SCAN, AUTO_MINT_MAX_TOTAL_PER_SCAN  (optional)
+   FLEET_PRIVATE_KEYS, EXECUTION_PRIVATE_KEY, BATCH_EXECUTOR_ADDRESS  (optional)
+   SCAN_INTERVAL_MS  (optional, default 120000 — how often the background pass runs)
+   ```
+5. Deploy. Render builds and starts the service; check its own Logs tab for the "Orbis bot started" line.
+6. **Delete the Cloudflare webhook** so Telegram stops routing updates there and starts delivering them to this long-polling process instead: visit `https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/deleteWebhook` in a browser (a plain GET request — safe to open directly) and confirm `"ok":true`. Telegram only delivers updates one way at a time (webhook *or* long-polling), so this step is required, not optional.
+7. Optional cleanup: pause or delete the Cloudflare Worker's Cron Trigger so it stops attempting (and failing) scans in the background — harmless since it can't complete a scan anyway, but no reason to leave it running.
+
 ## Serverless deployment (Cloudflare Workers + Supabase)
+
+Kept for reference, or for a Cloudflare Workers **Paid** plan ($5/month, 30s CPU time by default) where the 10ms constraint above doesn't apply.
 
 `scripts/telegram-bot.ts` needs a process that's always running (long-polling) and a writable filesystem (`data/*.jsonl`). `worker/index.ts` is the same bot re-pointed at a **webhook** and **Postgres**, so it can run on Cloudflare's free tier with no server to keep alive:
 

@@ -13,6 +13,7 @@
     "testnet-probe": "bun run scripts/testnet-probe.ts",
     "execute": "bun run scripts/execute.ts",
     "telegram-bot": "bun run scripts/telegram-bot.ts",
+    "render-bot": "bun run scripts/render-bot.ts",
     "discovery-bot": "bun run scripts/discovery-bot.ts",
     "set-webhook": "bun run scripts/set-webhook.ts",
     "delete-webhook": "bun run scripts/delete-webhook.ts",
