@@ -64,6 +64,8 @@ export class SupabasePreparedTransactionStore implements PreparedTransactionStor
         candidate_id: tx.candidateId ?? null,
         mint_function: tx.mintFunction ?? null,
         abi: tx.abi ?? null,
+        nft_contract: tx.nftContract ?? null,
+        name: tx.name ?? null,
       },
       { onConflict: "chain_id,to_address,data" },
     );
@@ -89,6 +91,8 @@ export class SupabasePreparedTransactionStore implements PreparedTransactionStor
       candidateId: row.candidate_id ?? undefined,
       mintFunction: row.mint_function ?? undefined,
       abi: row.abi ?? undefined,
+      nftContract: row.nft_contract ?? undefined,
+      name: row.name ?? undefined,
     }));
   }
 }
