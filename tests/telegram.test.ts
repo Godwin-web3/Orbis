@@ -179,6 +179,10 @@ describe("formatDropStatus", () => {
     const out = formatDropStatus(base, 1000);
     expect(out).toContain("https://opensea.io/assets/ethereum/0x0000000000000000000000000000000000000001");
   });
+  test("unavailable flags price/timing as unknown instead of showing a countdown or price", () => {
+    const out = formatDropStatus({ ...base, status: "unavailable" }, 1000);
+    expect(out).toContain("price/timing unknown");
+  });
 });
 
 describe("dropLink", () => {
@@ -232,5 +236,14 @@ describe("/upcoming command", () => {
     const statuses: DropStatus[] = [{ id: "e:1", chainKey: "ethereum", nftContract: "0x0000000000000000000000000000000000000001", source: "seadrop", status: "ended", mintPriceWei: "0", startTime: 0, endTime: now - 100, maxTotalMintableByWallet: 1, checkedAt: "now" }];
     const bot = makeBotWithDropStatus(statuses);
     expect(await bot.handleCommand("x", { command: "upcoming", args: [] })).toContain("Nothing upcoming or live right now");
+  });
+
+  test("shows non-SeaDrop contracts (e.g. from the general scanner) under OTHER DETECTED", async () => {
+    const statuses: DropStatus[] = [{ id: "robinhood:1", chainKey: "robinhood", nftContract: "0x0000000000000000000000000000000000000009", source: "block-contracts", status: "unavailable", name: "Robin Punks", mintPriceWei: "0", startTime: 0, endTime: 0, maxTotalMintableByWallet: 0, checkedAt: "now" }];
+    const bot = makeBotWithDropStatus(statuses);
+    const reply = await bot.handleCommand("x", { command: "upcoming", args: [] });
+    expect(reply).toContain("OTHER DETECTED (1, price/timing unknown)");
+    expect(reply).toContain("Robin Punks");
+    expect(reply).toContain("robinhood");
   });
 });

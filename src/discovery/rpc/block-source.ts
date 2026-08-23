@@ -1,9 +1,10 @@
 import { createPublicClient, http, pad, parseAbiItem, type Address, type PublicClient } from "viem";
-import type { DiscoverySource } from "../../domain/ports";
+import type { DiscoverySource, DropStatusStore } from "../../domain/ports";
 import type { MintCandidate } from "../../domain/types";
 import { detectMintFunction, identifyCandidate } from "../contract/detector";
 import type { BlockCursorStore } from "./block-cursor";
 import { fetchLogsViaEtherscan } from "./etherscan-logs";
+import { readErc721Name } from "./erc721-name";
 
 const TRANSFER_EVENT = parseAbiItem("event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)");
 const ZERO_ADDRESS: Address = "0x0000000000000000000000000000000000000000";
@@ -18,7 +19,7 @@ const MAX_BLOCK_RANGE = 50n;
 const RETRY_BLOCK_RANGE = 10n;
 const ETHERSCAN_BLOCK_RANGE = 5000n;
 
-export type BlockDiscoveryConfig = { chainKey: string; rpcUrls: string[]; startBlock?: bigint; confirmations?: bigint; client?: PublicClient; cursor?: BlockCursorStore; etherscan?: { apiKey: string; chainId: number } };
+export type BlockDiscoveryConfig = { chainKey: string; rpcUrls: string[]; startBlock?: bigint; confirmations?: bigint; client?: PublicClient; cursor?: BlockCursorStore; etherscan?: { apiKey: string; chainId: number }; dropStatusStore?: DropStatusStore };
 
 function capRange(from: bigint, safeLatest: bigint, max: bigint): bigint {
   const capped = from + max - 1n;
@@ -53,6 +54,16 @@ type LogLike = { address: Address; topics: readonly `0x${string}`[] };
  * A persisted cursor (see BlockCursorStore) tracks the last block scanned per chain so
  * consecutive scans cover contiguous ranges instead of only sampling a fixed recent
  * window each time and silently missing everything in between.
+ *
+ * `dropStatusStore`, when given, records a DropStatus("unavailable") entry for every
+ * contract found here with a detected mint function — this source has no standard way
+ * to read a generic contract's price/open window (unlike SeaDropDiscoverySource's
+ * getPublicDrop), so "unavailable" just means "found, mint-shaped, but timing/price
+ * unknown." Without this, only SeaDrop-launched collections ever show up in /upcoming;
+ * this is what lets a chain with no SeaDrop activity (e.g. Robinhood Chain) still show
+ * something there. If the same contract is also a confirmed SeaDrop drop, whichever
+ * source's save() call lands last during that scan pass wins — self-corrects on the
+ * next scan either way, so not worth coordinating between the two sources over.
  */
 export class BlockContractDiscoverySource implements DiscoverySource {
   readonly name = "block-contracts";
@@ -158,9 +169,29 @@ export class BlockContractDiscoverySource implements DiscoverySource {
   private async candidatesFor(client: PublicClient, contract: Address): Promise<MintCandidate[]> {
     const bytecode = await client.getBytecode({ address: contract });
     if (!bytecode) return [];
-    return detectMintFunction(bytecode).map((mintFunction) => {
+    const mintFunctions = detectMintFunction(bytecode);
+    if (mintFunctions.length && this.config.dropStatusStore) await this.saveStatus(client, contract);
+    return mintFunctions.map((mintFunction) => {
       const candidate = identifyCandidate(contract, this.config.chainKey, this.name, mintFunction);
       return { ...candidate, metadata: { ...candidate.metadata, mintEventObserved: true } };
+    });
+  }
+
+  private async saveStatus(client: PublicClient, contract: Address): Promise<void> {
+    if (!this.config.dropStatusStore) return;
+    const name = await readErc721Name(client, contract);
+    await this.config.dropStatusStore.save({
+      id: `${this.config.chainKey}:${contract}`,
+      chainKey: this.config.chainKey,
+      nftContract: contract,
+      source: this.name,
+      status: "unavailable",
+      ...(name ? { name } : {}),
+      mintPriceWei: "0",
+      startTime: 0,
+      endTime: 0,
+      maxTotalMintableByWallet: 0,
+      checkedAt: new Date().toISOString(),
     });
   }
 }

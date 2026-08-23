@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { encodeFunctionData, type PublicClient } from "viem";
 import { BlockContractDiscoverySource } from "../src/discovery/rpc/block-source";
 import type { BlockCursorStore } from "../src/discovery/rpc/block-cursor";
+import type { DropStatusStore } from "../src/domain/ports";
+import type { DropStatus } from "../src/domain/types";
 
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
@@ -34,7 +36,16 @@ function memCursor(): BlockCursorStore {
   };
 }
 
-function fakeClient(opts: { latest: bigint; logAddresses?: `0x${string}`[]; topics?: string[]; getLogsShouldThrowOnce?: boolean; getLogsAlwaysThrows?: boolean; blockTransactions?: unknown[]; receipts?: Record<string, { contractAddress?: `0x${string}` }> }): PublicClient {
+function memDropStatusStore(): DropStatusStore & { saved: DropStatus[] } {
+  const saved: DropStatus[] = [];
+  return {
+    saved,
+    save: async (status) => { saved.push(status); },
+    list: async () => saved,
+  };
+}
+
+function fakeClient(opts: { latest: bigint; logAddresses?: `0x${string}`[]; topics?: string[]; getLogsShouldThrowOnce?: boolean; getLogsAlwaysThrows?: boolean; blockTransactions?: unknown[]; receipts?: Record<string, { contractAddress?: `0x${string}` }>; names?: Record<string, string> }): PublicClient {
   let threw = false;
   return {
     getBlockNumber: async () => opts.latest,
@@ -46,6 +57,14 @@ function fakeClient(opts: { latest: bigint; logAddresses?: `0x${string}`[]; topi
     getBlock: async () => ({ transactions: opts.blockTransactions ?? [] }),
     getTransactionReceipt: async ({ hash }: { hash: string }) => opts.receipts?.[hash] ?? {},
     getBytecode: async () => MINT_BYTECODE,
+    readContract: async ({ address, functionName }: { address: `0x${string}`; functionName: string }) => {
+      if (functionName === "name") {
+        const name = opts.names?.[address];
+        if (!name) throw new Error("contract does not implement name()");
+        return name;
+      }
+      throw new Error(`unexpected readContract call: ${functionName}`);
+    },
   } as unknown as PublicClient;
 }
 
@@ -168,5 +187,56 @@ describe("BlockContractDiscoverySource", () => {
     const client = { getBlockNumber: async () => 10000n, getBytecode: async () => MINT_BYTECODE } as unknown as PublicClient;
     const source = new BlockContractDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, confirmations: 2n, etherscan: { apiKey: "key", chainId: 1 } });
     expect(await source.discover()).toEqual([]);
+  });
+});
+
+describe("dropStatusStore", () => {
+  test("records an 'unavailable' status for a contract with a detected mint function", async () => {
+    const cursor = memCursor();
+    const dropStatusStore = memDropStatusStore();
+    const contract = "0x0000000000000000000000000000000000000010" as `0x${string}`;
+    const client = fakeClient({ latest: 1000n, logAddresses: [contract], names: { [contract]: "Cool Cats" } });
+    const source = new BlockContractDiscoverySource({ chainKey: "robinhood", rpcUrls: [], client, cursor, confirmations: 2n, dropStatusStore });
+
+    await source.discover();
+    expect(dropStatusStore.saved).toHaveLength(1);
+    expect(dropStatusStore.saved[0]).toMatchObject({ id: `robinhood:${contract}`, chainKey: "robinhood", nftContract: contract, status: "unavailable", name: "Cool Cats" });
+  });
+
+  test("omits name when the contract doesn't implement name()", async () => {
+    const cursor = memCursor();
+    const dropStatusStore = memDropStatusStore();
+    const contract = "0x0000000000000000000000000000000000000011" as `0x${string}`;
+    const client = fakeClient({ latest: 1000n, logAddresses: [contract] });
+    const source = new BlockContractDiscoverySource({ chainKey: "robinhood", rpcUrls: [], client, cursor, confirmations: 2n, dropStatusStore });
+
+    await source.discover();
+    expect(dropStatusStore.saved[0].name).toBeUndefined();
+  });
+
+  test("skips saving status entirely when no dropStatusStore is configured", async () => {
+    const cursor = memCursor();
+    const contract = "0x0000000000000000000000000000000000000012" as `0x${string}`;
+    const client = fakeClient({ latest: 1000n, logAddresses: [contract] });
+    const source = new BlockContractDiscoverySource({ chainKey: "robinhood", rpcUrls: [], client, cursor, confirmations: 2n });
+    // No dropStatusStore passed; readContract would throw "unexpected readContract call"
+    // if the source tried to read name() anyway, so a normal candidate coming back proves it didn't.
+    const candidates = await source.discover();
+    expect(candidates.length).toBeGreaterThan(0);
+  });
+
+  test("doesn't save a status for a contract with no recognizable mint function", async () => {
+    const cursor = memCursor();
+    const dropStatusStore = memDropStatusStore();
+    const contract = "0x0000000000000000000000000000000000000013" as `0x${string}`;
+    const client = {
+      getBlockNumber: async () => 1000n,
+      getLogs: async () => [{ address: contract, blockNumber: 998n, topics: ERC721_TOPICS, data: "0x" }],
+      getBytecode: async () => "0x00" as `0x${string}`,
+    } as unknown as PublicClient;
+    const source = new BlockContractDiscoverySource({ chainKey: "robinhood", rpcUrls: [], client, cursor, confirmations: 2n, dropStatusStore });
+
+    await source.discover();
+    expect(dropStatusStore.saved).toHaveLength(0);
   });
 });

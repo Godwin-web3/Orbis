@@ -4,6 +4,7 @@ import type { DropStatus, MintCandidate } from "../../domain/types";
 import type { BlockCursorStore } from "./block-cursor";
 import type { ContractRegistry } from "./contract-registry";
 import { fetchLogsViaEtherscan } from "./etherscan-logs";
+import { readErc721Name } from "./erc721-name";
 
 // OpenSea's SeaDrop singleton — identical address across Ethereum, Base, and Robinhood
 // Chain (cross-verified against two independent third-party mint tools that hardcode
@@ -43,10 +44,6 @@ const SEADROP_ABI = [
   { type: "function", name: "getAllowedFeeRecipients", stateMutability: "view", inputs: [{ name: "nftContract", type: "address" }], outputs: [{ type: "address[]" }] },
   { type: "function", name: "mintPublic", stateMutability: "payable", inputs: [{ name: "nftContract", type: "address" }, { name: "feeRecipient", type: "address" }, { name: "minterIfNotPayer", type: "address" }, { name: "quantity", type: "uint256" }], outputs: [] },
 ] as const satisfies Abi;
-
-// Standard ERC-721 metadata extension — part of the spec, but technically optional, so
-// contracts that skip it are read with a try/catch rather than assumed to implement it.
-const ERC721_NAME_ABI = [{ type: "function", name: "name", stateMutability: "view", inputs: [], outputs: [{ type: "string" }] }] as const satisfies Abi;
 
 const MAX_BLOCK_RANGE = 50n;
 const ETHERSCAN_BLOCK_RANGE = 5000n;
@@ -176,7 +173,7 @@ export class SeaDropDiscoverySource implements DiscoverySource {
       const now = Math.floor(Date.now() / 1000);
       const status: DropStatus["status"] = now < startTime ? "upcoming" : endTime !== 0 && now > endTime ? "ended" : mintPrice !== 0n ? "live_paid" : "live_free";
       // Only bother with the extra RPC round trip when something will actually display it.
-      const name = this.config.dropStatusStore ? await this.readName(client, nftContract) : undefined;
+      const name = this.config.dropStatusStore ? await readErc721Name(client, nftContract) : undefined;
       await this.saveStatus(nftContract, status, name, mintPrice, startTime, endTime, maxTotalMintableByWallet);
       if (status !== "live_free") return undefined;
 
@@ -216,16 +213,6 @@ export class SeaDropDiscoverySource implements DiscoverySource {
       };
     } catch {
       return undefined; // not a SeaDrop-registered contract, or a transient RPC error
-    }
-  }
-
-  /** Standard ERC-721 name() — part of the metadata extension, but optional, so plenty of contracts revert or don't implement it. */
-  private async readName(client: PublicClient, nftContract: Address): Promise<string | undefined> {
-    try {
-      const name = await client.readContract({ address: nftContract, abi: ERC721_NAME_ABI, functionName: "name" });
-      return name || undefined;
-    } catch {
-      return undefined;
     }
   }
 

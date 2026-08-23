@@ -47,6 +47,7 @@ export function formatDropStatus(status: DropStatus, now: number): string {
   if (status.status === "upcoming") return `${base} · opens in ${formatCountdown(status.startTime - now)}${suffix}`;
   if (status.status === "live_free") return `${base} · max ${status.maxTotalMintableByWallet}/wallet${status.endTime ? ` · closes in ${formatCountdown(status.endTime - now)}` : ""}${suffix}`;
   if (status.status === "live_paid") return `${base} · ${formatEther(BigInt(status.mintPriceWei))} ETH${suffix}`;
+  if (status.status === "unavailable") return `${base} · price/timing unknown${suffix}`;
   return `${base}${suffix}`;
 }
 
@@ -210,13 +211,17 @@ export class TelegramCommandBot {
     const liveFree = all.filter((d) => d.status === "live_free").slice(0, 10);
     const livePaid = all.filter((d) => d.status === "live_paid").slice(0, 5);
     const endedCount = all.filter((d) => d.status === "ended").length;
+    // Chains/sources with no way to read price+timing (e.g. non-SeaDrop contracts found by
+    // the general scanner) still land here so they're not invisible — just unclassified.
+    const other = all.filter((d) => d.status === "unavailable").slice(0, 10);
 
-    if (!upcoming.length && !liveFree.length && !livePaid.length) return "Nothing upcoming or live right now — check back after the next scan.";
+    if (!upcoming.length && !liveFree.length && !livePaid.length && !other.length) return "Nothing upcoming or live right now — check back after the next scan.";
 
     const lines = ["Known drops"];
     if (upcoming.length) lines.push("", `UPCOMING (${upcoming.length}):`, ...upcoming.map((d) => formatDropStatus(d, now)));
     if (liveFree.length) lines.push("", `LIVE & FREE (${liveFree.length}):`, ...liveFree.map((d) => formatDropStatus(d, now)));
     if (livePaid.length) lines.push("", `LIVE, NOT FREE (${livePaid.length}):`, ...livePaid.map((d) => formatDropStatus(d, now)));
+    if (other.length) lines.push("", `OTHER DETECTED (${other.length}, price/timing unknown):`, ...other.map((d) => formatDropStatus(d, now)));
     if (endedCount) lines.push("", `${endedCount} ended drop(s) not shown.`);
     return lines.join("\n");
   }
