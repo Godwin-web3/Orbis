@@ -1,0 +1,19 @@
+name: Render keep-alive
+
+# Render's free Web Service plan spins the instance down after 15 minutes with no
+# inbound HTTP request. scripts/render-bot.ts talks to Telegram via outbound
+# long-polling only, so without something pinging it, it would never receive any
+# inbound traffic at all and would spin down almost immediately. This workflow is
+# that ping — well under the 15-minute window, with margin for GitHub's own
+# scheduling jitter (documented to occasionally delay scheduled runs).
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Render service
+        run: curl -fsS --max-time 30 https://orbis-telegram-bot.onrender.com/ || true

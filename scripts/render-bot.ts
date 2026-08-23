@@ -1,12 +1,25 @@
-// Always-on Telegram bot for a persistent host (Render's free Background Worker, or any
-// other machine that can run a long-lived Bun process) — no CPU-time-per-invocation limit,
-// unlike Cloudflare Workers (see worker/index.ts's doc comments for that whole saga).
+// Always-on Telegram bot for a persistent host (deployed as a Render free Web Service, or
+// any other machine that can run a long-lived Bun process) — no CPU-time-per-invocation
+// limit, unlike Cloudflare Workers (see worker/index.ts's doc comments for that whole saga).
 // Same command set as scripts/telegram-bot.ts, but Supabase-backed throughout instead of
-// local JSONL files, since a Render worker's disk isn't guaranteed to persist across
+// local JSONL files, since a Render service's disk isn't guaranteed to persist across
 // restarts/redeploys the way a real server's would. Also folds back in the periodic
 // discovery scan + auto-mint loop that a persistent process can run directly with
 // setInterval — Cloudflare's Cron Trigger existed only because Workers has no persistent
 // process to host that loop in.
+//
+// Render's free tier only applies to "Web Service" instances (Background Workers require
+// a paid plan), and a Web Service needs to actually serve HTTP — Render marks it unhealthy,
+// and free web services spin down after 15 minutes with no *inbound* request, which is all
+// this process ever gets since it talks to Telegram via outbound long-polling, never an
+// inbound webhook. minimalHealthServer() below exists purely so Render sees a live port;
+// something external needs to hit it periodically to prevent that spin-down (see the
+// GitHub Actions keep-alive workflow, .github/workflows/render-keepalive.yml).
+function minimalHealthServer(): void {
+  const port = Number(process.env.PORT ?? 3000);
+  Bun.serve({ port, fetch: () => new Response("Orbis bot is running.") });
+  console.log(`Health server listening on :${port} (keeps Render's free Web Service plan from marking this unhealthy).`);
+}
 import { buildRuntime, urlsFor } from "../src/app/runtime";
 import { RpcExecutor } from "../src/execution/executor";
 import { WalletFleet, MintRelay } from "../src/execution/relay";
@@ -35,6 +48,7 @@ function splitKeys(value: string): string[] {
 }
 
 async function main() {
+  minimalHealthServer();
   const token = process.env.TELEGRAM_BOT_TOKEN ?? "";
   const allowed = (process.env.TELEGRAM_ADMIN_IDS ?? process.env.TELEGRAM_CHAT_ID ?? "").split(",").map((value) => value.trim()).filter(Boolean);
   if (!token) throw new Error("Set TELEGRAM_BOT_TOKEN (create a bot via @BotFather).");
