@@ -169,8 +169,13 @@ export class BlockContractDiscoverySource implements DiscoverySource {
   private async candidatesFor(client: PublicClient, contract: Address): Promise<MintCandidate[]> {
     const bytecode = await client.getBytecode({ address: contract });
     if (!bytecode) return [];
+    // Reaching here at all means a real mint-shaped event fired (or the contract was just
+    // deployed) — worth recording even if its bytecode doesn't match one of our known
+    // mint-function selectors below, so it isn't invisible just because we can't build a
+    // calldata for it yet. Gating this on detectMintFunction() instead would hide exactly
+    // the contracts this store exists to surface (see block-source.ts's class doc comment).
+    if (this.config.dropStatusStore) await this.saveStatus(client, contract);
     const mintFunctions = detectMintFunction(bytecode);
-    if (mintFunctions.length && this.config.dropStatusStore) await this.saveStatus(client, contract);
     return mintFunctions.map((mintFunction) => {
       const candidate = identifyCandidate(contract, this.config.chainKey, this.name, mintFunction);
       return { ...candidate, metadata: { ...candidate.metadata, mintEventObserved: true } };

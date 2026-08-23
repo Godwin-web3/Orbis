@@ -77,11 +77,16 @@ function fakeClient(opts: {
   allowedFeeRecipients?: Record<string, `0x${string}`[]>;
   names?: Record<string, string>;
   getLogsThrows?: boolean;
+  getLogsShouldThrowOnce?: boolean;
+  getLogsRanges?: { fromBlock: bigint; toBlock: bigint }[];
 }): PublicClient {
+  let threw = false;
   return {
     getBlockNumber: async () => opts.latest,
-    getLogs: async () => {
+    getLogs: async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) => {
+      opts.getLogsRanges?.push({ fromBlock, toBlock });
       if (opts.getLogsThrows) throw new Error("Please specify an address in your request");
+      if (opts.getLogsShouldThrowOnce && !threw) { threw = true; throw new Error("eth_getLogs range too large for this API key"); }
       return (opts.mintedContracts ?? []).map((nftContract) => ({ args: { nftContract, minter: "0x1", feeRecipient: OPENSEA_FEE_RECIPIENT } }));
     },
     readContract: async ({ address, functionName, args }: { address: string; functionName: string; args: unknown[] }) => {
@@ -198,6 +203,27 @@ describe("SeaDropDiscoverySource", () => {
     const cursor = memCursor();
     const client = fakeClient({ latest: 1000n, getLogsThrows: true });
     const source = new SeaDropDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, confirmations: 2n });
+    expect(await source.discover()).toEqual([]);
+  });
+
+  test("retries at a smaller block range when the provider rejects the first request (e.g. Alchemy free tier on Robinhood Chain)", async () => {
+    const cursor = memCursor();
+    await cursor.set("seadrop:robinhood", 100n); // far enough behind that the full 50-block range applies
+    const ranges: { fromBlock: bigint; toBlock: bigint }[] = [];
+    const client = fakeClient({ latest: 1000n, mintedContracts: [CONTRACT_A], drops: { [CONTRACT_A]: freeOpenDrop() }, getLogsShouldThrowOnce: true, getLogsRanges: ranges });
+    const source = new SeaDropDiscoverySource({ chainKey: "robinhood", rpcUrls: [], client, cursor, confirmations: 2n });
+
+    const candidates = await source.discover();
+    expect(candidates.length).toBe(1); // succeeded on the retry, not just swallowed the error
+    expect(ranges.length).toBe(2);
+    expect(ranges[0].toBlock - ranges[0].fromBlock).toBe(49n); // first attempt: the normal 50-block range
+    expect(ranges[1].toBlock - ranges[1].fromBlock).toBe(9n); // retry: the narrower 10-block range
+  });
+
+  test("still fails the scan (without throwing) if even the smaller retry range is rejected", async () => {
+    const cursor = memCursor();
+    const client = fakeClient({ latest: 1000n, getLogsThrows: true });
+    const source = new SeaDropDiscoverySource({ chainKey: "robinhood", rpcUrls: [], client, cursor, confirmations: 2n });
     expect(await source.discover()).toEqual([]);
   });
 

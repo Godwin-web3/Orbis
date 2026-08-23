@@ -26,6 +26,11 @@ function topicToAddress(topic: `0x${string}`): Address {
   return `0x${topic.slice(-40)}` as Address;
 }
 
+function capRange(from: bigint, safeLatest: bigint, max: bigint): bigint {
+  const capped = from + max - 1n;
+  return capped < safeLatest ? capped : safeLatest;
+}
+
 const SEADROP_ABI = [
   {
     type: "function", name: "getPublicDrop", stateMutability: "view",
@@ -46,6 +51,7 @@ const SEADROP_ABI = [
 ] as const satisfies Abi;
 
 const MAX_BLOCK_RANGE = 50n;
+const RETRY_BLOCK_RANGE = 10n;
 const ETHERSCAN_BLOCK_RANGE = 5000n;
 // Cloudflare Workers' free plan caps a single invocation at 50 external subrequests
 // total (RPC calls, Etherscan, Supabase — everything), shared across every discovery
@@ -110,25 +116,26 @@ export class SeaDropDiscoverySource implements DiscoverySource {
     const safeLatest = latest - (this.config.confirmations ?? 2n);
     const cursorKey = `seadrop:${this.config.chainKey}`;
     const stored = this.config.cursor ? await this.config.cursor.get(cursorKey) : undefined;
-    const range = this.config.etherscan ? ETHERSCAN_BLOCK_RANGE : MAX_BLOCK_RANGE;
     const defaultStart = safeLatest > 20n ? safeLatest - 20n : 0n;
     const fromBlock = stored !== undefined && stored + 1n <= safeLatest ? stored + 1n : defaultStart;
     if (fromBlock > safeLatest) return [];
-    const toBlock = fromBlock + range - 1n < safeLatest ? fromBlock + range - 1n : safeLatest;
 
     const registryKey = this.config.chainKey;
     const newlySeen = new Set<Address>();
     let eventCount = 0;
+    let toBlock: bigint;
     if (this.config.etherscan) {
+      toBlock = capRange(fromBlock, safeLatest, ETHERSCAN_BLOCK_RANGE);
       const logs = await fetchLogsViaEtherscan(this.config.etherscan, { address: SEADROP_ADDRESS, topics: [SEADROP_MINT_TOPIC0], fromBlock, toBlock });
       eventCount = logs.length;
       for (const log of logs) {
         if (log.topics[1]) newlySeen.add(topicToAddress(log.topics[1]));
       }
     } else {
-      const logs = await client.getLogs({ address: SEADROP_ADDRESS, event: SEADROP_MINT_EVENT, fromBlock, toBlock });
-      eventCount = logs.length;
-      for (const log of logs) {
+      const result = await this.fetchLogsWithRetry(client, fromBlock, safeLatest);
+      toBlock = result.toBlock;
+      eventCount = result.logs.length;
+      for (const log of result.logs) {
         if (log.args.nftContract) newlySeen.add(log.args.nftContract);
       }
     }
@@ -146,6 +153,23 @@ export class SeaDropDiscoverySource implements DiscoverySource {
 
     if (this.config.cursor) await this.config.cursor.set(cursorKey, toBlock);
     return candidates;
+  }
+
+  /** Some free-tier RPC providers (confirmed: Alchemy on Robinhood Chain) reject an
+   * eth_getLogs call spanning more than ~10 blocks, even though MAX_BLOCK_RANGE (50) is
+   * fine elsewhere — mirrors block-source.ts's retry-at-a-smaller-range fallback rather
+   * than letting the whole scan fail outright on providers with that tighter cap. */
+  private async fetchLogsWithRetry(client: PublicClient, fromBlock: bigint, safeLatest: bigint) {
+    let toBlock = capRange(fromBlock, safeLatest, MAX_BLOCK_RANGE);
+    try {
+      const logs = await client.getLogs({ address: SEADROP_ADDRESS, event: SEADROP_MINT_EVENT, fromBlock, toBlock });
+      return { logs, toBlock };
+    } catch (error) {
+      console.error(`[${this.config.chainKey}] seadrop getLogs failed for range ${fromBlock}-${toBlock}:`, (error as Error).message);
+    }
+    toBlock = capRange(fromBlock, safeLatest, RETRY_BLOCK_RANGE);
+    const logs = await client.getLogs({ address: SEADROP_ADDRESS, event: SEADROP_MINT_EVENT, fromBlock, toBlock });
+    return { logs, toBlock };
   }
 
   /** Picks a bounded, rotating slice of `known` to re-check this pass (excluding anything already covered by `newlySeen`), so registry re-checks stay within subrequest budget regardless of how large the registry grows. Advances and persists the rotation offset via `cursor` so every known contract gets revisited over successive scans. */

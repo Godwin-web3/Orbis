@@ -225,7 +225,7 @@ describe("dropStatusStore", () => {
     expect(candidates.length).toBeGreaterThan(0);
   });
 
-  test("doesn't save a status for a contract with no recognizable mint function", async () => {
+  test("still records a status for a contract with no recognizable mint function — a real mint event fired regardless", async () => {
     const cursor = memCursor();
     const dropStatusStore = memDropStatusStore();
     const contract = "0x0000000000000000000000000000000000000013" as `0x${string}`;
@@ -233,6 +233,24 @@ describe("dropStatusStore", () => {
       getBlockNumber: async () => 1000n,
       getLogs: async () => [{ address: contract, blockNumber: 998n, topics: ERC721_TOPICS, data: "0x" }],
       getBytecode: async () => "0x00" as `0x${string}`,
+      readContract: async () => { throw new Error("contract does not implement name()"); },
+    } as unknown as PublicClient;
+    const source = new BlockContractDiscoverySource({ chainKey: "robinhood", rpcUrls: [], client, cursor, confirmations: 2n, dropStatusStore });
+
+    const candidates = await source.discover();
+    expect(candidates).toEqual([]); // no recognizable mint function -> still no candidate
+    expect(dropStatusStore.saved).toHaveLength(1); // but the sighting itself is recorded
+    expect(dropStatusStore.saved[0]).toMatchObject({ nftContract: contract, status: "unavailable" });
+  });
+
+  test("doesn't save a status when there's no bytecode at all (not a real contract)", async () => {
+    const cursor = memCursor();
+    const dropStatusStore = memDropStatusStore();
+    const contract = "0x0000000000000000000000000000000000000014" as `0x${string}`;
+    const client = {
+      getBlockNumber: async () => 1000n,
+      getLogs: async () => [{ address: contract, blockNumber: 998n, topics: ERC721_TOPICS, data: "0x" }],
+      getBytecode: async () => undefined,
     } as unknown as PublicClient;
     const source = new BlockContractDiscoverySource({ chainKey: "robinhood", rpcUrls: [], client, cursor, confirmations: 2n, dropStatusStore });
 
