@@ -19,7 +19,16 @@ export class DefaultPolicyEngine implements PolicyEngine {
     // it has no other way to know an arbitrary contract is legitimate.
     if (!opportunity.candidate.metadata.seadrop && !simulation.assetDiff.some((diff) => diff.kind === "nft" && diff.direction === "in")) reasons.push("simulation did not show NFT receipt");
     if (opportunity.gasNative > maxGas) reasons.push(`gas exceeds ${maxGas} native token limit`);
-    if (opportunity.expectedValueNative <= minExpectedValue) reasons.push("expected value is below configured threshold");
+    // expectedValueNative only means something when a real resale/floor-price estimate was
+    // actually supplied — nothing in this codebase's discovery sources populates
+    // metadata.estimatedValueNative today (no price-oracle integration), so it silently
+    // defaults to 0, making expectedValueNative always just -gasNative and this check
+    // reject every single real candidate, unconditionally, regardless of anything else
+    // being correct. Gating on whether an estimate was actually provided (rather than on
+    // expectedValueNative's value alone) keeps this a real profitability gate for whenever
+    // that integration exists, without it silently vetoing every mint in the meantime.
+    const hasValueEstimate = opportunity.candidate.metadata.estimatedValueNative !== undefined;
+    if (hasValueEstimate && opportunity.expectedValueNative <= minExpectedValue) reasons.push("expected value is below configured threshold");
     return { allowed: reasons.length === 0, reasons };
   }
 }

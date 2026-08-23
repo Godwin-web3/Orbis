@@ -49,4 +49,27 @@ describe("DefaultPolicyEngine", () => {
     expect(decision.allowed).toBe(false);
     expect(decision.reasons).toContain("reverted");
   });
+
+  test("allows a real-world candidate even though nothing populates metadata.estimatedValueNative (no price-oracle integration exists) — expectedValueNative is always <= 0 in that case, but there's no actual estimate to judge it by", async () => {
+    const opp = opportunity({
+      candidate: candidate({ source: "seadrop", metadata: { assetType: "nft", seadrop: true } }), // no estimatedValueNative key
+      estimatedValueNative: 0,
+      expectedValueNative: -0.001, // just -gasNative, as it always is without a value estimate
+    });
+    const decision = await new DefaultPolicyEngine().evaluate(opp, simulation());
+    expect(decision.allowed).toBe(true);
+    expect(decision.reasons).not.toContain("expected value is below configured threshold");
+  });
+
+  test("still rejects when a real value estimate was supplied and gas eats the expected value below threshold", async () => {
+    const opp = opportunity({
+      candidate: candidate({ metadata: { assetType: "nft", estimatedValueNative: 0.0001 } }),
+      estimatedValueNative: 0,
+      expectedValueNative: -0.001,
+    });
+    const sim = simulation({ stateDiffAvailable: true, assetDiff: [{ kind: "nft", direction: "in" }] });
+    const decision = await new DefaultPolicyEngine().evaluate(opp, sim);
+    expect(decision.allowed).toBe(false);
+    expect(decision.reasons).toContain("expected value is below configured threshold");
+  });
 });
