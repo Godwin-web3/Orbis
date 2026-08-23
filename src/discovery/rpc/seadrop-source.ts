@@ -1,6 +1,6 @@
 import { createPublicClient, http, encodeFunctionData, parseAbiItem, type Abi, type Address, type PublicClient } from "viem";
-import type { DiscoverySource } from "../../domain/ports";
-import type { MintCandidate } from "../../domain/types";
+import type { DiscoverySource, DropStatusStore } from "../../domain/ports";
+import type { DropStatus, MintCandidate } from "../../domain/types";
 import type { BlockCursorStore } from "./block-cursor";
 import type { ContractRegistry } from "./contract-registry";
 import { fetchLogsViaEtherscan } from "./etherscan-logs";
@@ -54,7 +54,7 @@ const ETHERSCAN_BLOCK_RANGE = 5000n;
 // here; the rest rotate in over subsequent scans (see the offset persisted via `cursor`).
 const DEFAULT_MAX_REGISTRY_RECHECK = 15;
 
-export type SeaDropDiscoveryConfig = { chainKey: string; rpcUrls: string[]; confirmations?: bigint; client?: PublicClient; cursor?: BlockCursorStore; registry?: ContractRegistry; quantity?: number; etherscan?: { apiKey: string; chainId: number }; maxRegistryRecheck?: number };
+export type SeaDropDiscoveryConfig = { chainKey: string; rpcUrls: string[]; confirmations?: bigint; client?: PublicClient; cursor?: BlockCursorStore; registry?: ContractRegistry; quantity?: number; etherscan?: { apiKey: string; chainId: number }; maxRegistryRecheck?: number; dropStatusStore?: DropStatusStore };
 
 /**
  * Watches OpenSea's SeaDrop singleton for live mint activity, then confirms each
@@ -80,6 +80,12 @@ export type SeaDropDiscoveryConfig = { chainKey: string; rpcUrls: string[]; conf
  * events per hour chain-wide) that a 50-block/minute window can go a long time without
  * a fresh event to seed the registry from. A wider range means fewer scans needed to
  * catch that first mint for a given collection.
+ *
+ * `dropStatusStore`, when given, records the full status of *every* contract checked here
+ * (live free, live paid, upcoming, ended) — not just the ones that become a MintCandidate.
+ * Without it, "not currently mintable" and "doesn't exist" look identical from the outside:
+ * there's no way to answer "what's coming up" or "what's live but not free." See DropStatus's
+ * doc comment. Powers the bot's /upcoming command.
  */
 export class SeaDropDiscoverySource implements DiscoverySource {
   readonly name = "seadrop";
@@ -161,10 +167,12 @@ export class SeaDropDiscoverySource implements DiscoverySource {
       // abitype decodes Solidity ints <=48 bits (startTime/endTime/maxTotalMintableByWallet
       // here, all uint48 or smaller) as `number`, and anything wider (mintPrice, uint80) as `bigint`.
       const { mintPrice, startTime, endTime, maxTotalMintableByWallet, restrictFeeRecipients } = drop;
-      if (startTime === 0 && endTime === 0 && maxTotalMintableByWallet === 0) return undefined; // unset mapping entry
-      if (mintPrice !== 0n) return undefined; // not free
+      if (startTime === 0 && endTime === 0 && maxTotalMintableByWallet === 0) return undefined; // unset mapping entry — not a real SeaDrop-registered drop
+
       const now = Math.floor(Date.now() / 1000);
-      if (now < startTime || (endTime !== 0 && now > endTime)) return undefined; // not currently open
+      const status: DropStatus["status"] = now < startTime ? "upcoming" : endTime !== 0 && now > endTime ? "ended" : mintPrice !== 0n ? "live_paid" : "live_free";
+      await this.saveStatus(nftContract, status, mintPrice, startTime, endTime, maxTotalMintableByWallet);
+      if (status !== "live_free") return undefined;
 
       let feeRecipient: Address = OPENSEA_FEE_RECIPIENT;
       if (restrictFeeRecipients) {
@@ -202,5 +210,21 @@ export class SeaDropDiscoverySource implements DiscoverySource {
     } catch {
       return undefined; // not a SeaDrop-registered contract, or a transient RPC error
     }
+  }
+
+  private async saveStatus(nftContract: Address, status: DropStatus["status"], mintPrice: bigint, startTime: number, endTime: number, maxTotalMintableByWallet: number): Promise<void> {
+    if (!this.config.dropStatusStore) return;
+    await this.config.dropStatusStore.save({
+      id: `${this.config.chainKey}:${nftContract}`,
+      chainKey: this.config.chainKey,
+      nftContract,
+      source: this.name,
+      status,
+      mintPriceWei: mintPrice.toString(),
+      startTime,
+      endTime,
+      maxTotalMintableByWallet,
+      checkedAt: new Date().toISOString(),
+    });
   }
 }

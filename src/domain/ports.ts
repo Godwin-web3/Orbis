@@ -1,4 +1,4 @@
-import type { Classification, MintCandidate, Opportunity, PreparedTransaction, SimulationResult, TransactionRequest } from "./types";
+import type { Classification, DropStatus, MintCandidate, Opportunity, PreparedTransaction, SimulationResult, TransactionRequest } from "./types";
 export interface DiscoverySource { readonly name: string; discover(): Promise<MintCandidate[]>; }
 export interface ContractInspector { inspect(candidate: MintCandidate): Promise<MintCandidate>; }
 export interface CalldataBuilder { build(candidate: MintCandidate): Promise<TransactionRequest>; }
@@ -15,3 +15,4 @@ export interface Verifier { verify(txHash: `0x${string}`, candidate: MintCandida
 export interface GasStrategy { gasLimit(simulation: SimulationResult): bigint | undefined; }
 export interface NotificationSink { send(message: string): Promise<void>; }
 export interface CandidateStore { save(candidate: MintCandidate): Promise<void>; list(): Promise<MintCandidate[]>; }
+export interface DropStatusStore { save(status: DropStatus): Promise<void>; list(): Promise<DropStatus[]>; }

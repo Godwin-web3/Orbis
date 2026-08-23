@@ -10,6 +10,7 @@ import { JsonlUserRegistry } from "../src/users/registry";
 import { JsonlUserKeyStore, parseEncryptionKey } from "../src/users/keystore";
 import { TelegramCommandBot } from "../src/telegram/bot";
 import { parseTargetInput, processTarget } from "../src/discovery/target";
+import { JsonlDropStatusStore } from "../src/discovery/rpc/drop-status";
 import { enabledChains } from "../config/chains";
 
 const GUARD_PATH = process.env.GUARD_STATE_PATH ?? "data/guard.json";
@@ -40,6 +41,7 @@ async function main() {
   const nonCustodial = new NonCustodialRelay();
   const prepared = new JsonlPreparedTransactionStore(process.env.PREPARED_LOG ?? "data/prepared-transactions.jsonl");
   const users = new JsonlUserRegistry(process.env.USER_REGISTRY_PATH ?? "data/users.jsonl");
+  const dropStatusStore = new JsonlDropStatusStore(process.env.DROP_STATUS_PATH ?? "data/drop-status.json");
   const chainsEnabled = enabledChains().map((chain) => chain.key);
   let guardEnabled = await loadGuard();
   const guard = { get: () => guardEnabled, set: async (value: boolean) => { guardEnabled = value; await saveGuard(value); } };
@@ -58,8 +60,9 @@ async function main() {
     keystore,
     chainsEnabled,
     guard,
+    dropStatus: dropStatusStore,
     scan: async () => {
-      const engine = buildRuntime();
+      const engine = buildRuntime({ dropStatusStore });
       const result = await engine.run();
       return result.count;
     },
@@ -68,7 +71,7 @@ async function main() {
       const resolved = parseTargetInput(input, defaultChainKey);
       if (!resolved) return "Couldn't figure out the chain/contract from that. Paste the raw 0x contract address, or use an OpenSea asset, Zora, or block-explorer URL.";
       if (!chainsEnabled.includes(resolved.chainKey)) return `Chain "${resolved.chainKey}" isn't enabled. Enabled: ${chainsEnabled.join(", ") || "none"}.`;
-      const engine = buildRuntime({ chainKeys: [resolved.chainKey] });
+      const engine = buildRuntime({ dropStatusStore, chainKeys: [resolved.chainKey] });
       return processTarget(engine, urlsFor(resolved.chainKey), resolved);
     },
   });

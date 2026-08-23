@@ -1,5 +1,6 @@
-import type { PreparedTransactionStore } from "../domain/ports";
-import type { PreparedTransaction } from "../domain/types";
+import { formatEther } from "viem";
+import type { DropStatusStore, PreparedTransactionStore } from "../domain/ports";
+import type { DropStatus, PreparedTransaction } from "../domain/types";
 import type { RpcExecutor } from "../execution/executor";
 import type { UserRegistry } from "../users/registry";
 import type { UserKeyStore } from "../users/keystore";
@@ -16,6 +17,26 @@ export function parseCommand(text: string): ParsedCommand | null {
   const [head, ...rest] = trimmed.slice(1).split(/\s+/);
   if (!head) return null;
   return { command: head.split("@")[0].toLowerCase(), args: rest };
+}
+
+/** "3d 4h", "2h 15m", "45m", "just now" — always the two most significant units, never negative (callers pass max(0, ...) or filter to future timestamps). */
+export function formatCountdown(seconds: number): string {
+  const s = Math.max(0, seconds);
+  if (s < 60) return "under a minute";
+  const days = Math.floor(s / 86400);
+  const hours = Math.floor((s % 86400) / 3600);
+  const minutes = Math.floor((s % 3600) / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
+}
+
+export function formatDropStatus(status: DropStatus, now: number): string {
+  const base = `  ${status.nftContract} · ${status.chainKey}`;
+  if (status.status === "upcoming") return `${base} · opens in ${formatCountdown(status.startTime - now)}`;
+  if (status.status === "live_free") return `${base} · max ${status.maxTotalMintableByWallet}/wallet${status.endTime ? ` · closes in ${formatCountdown(status.endTime - now)}` : ""}`;
+  if (status.status === "live_paid") return `${base} · ${formatEther(BigInt(status.mintPriceWei))} ETH`;
+  return base;
 }
 
 export function formatPrepared(tx: PreparedTransaction, index: number): string {
@@ -45,6 +66,8 @@ export class TelegramCommandBot {
       scan: () => Promise<number>;
       /** Resolves a pasted contract address or URL and runs it through the same classify/simulate/policy pipeline as auto-discovery. */
       target?: (input: string) => Promise<string>;
+      /** Every drop a discovery source has ever checked — live free, live paid, upcoming, ended — not just the ones that became a ready-to-mint candidate. Powers /upcoming. */
+      dropStatus?: DropStatusStore;
       chainsEnabled: string[];
     },
   ) {}
@@ -76,6 +99,7 @@ export class TelegramCommandBot {
       case "register": return this.register(chatId, parsed.args);
       case "scan": return this.scan();
       case "target": return this.target(parsed.args);
+      case "upcoming": return this.upcoming();
       case "prepared": return this.prepared();
       case "mint": return this.mint(chatId, parsed.args);
       case "sign": return this.sign(chatId, parsed.args);
@@ -97,6 +121,7 @@ export class TelegramCommandBot {
       "/status — wallet, chains, guard, registered users, prepared count",
       "/scan — run a discovery+simulation+prepare pass",
       "/target <address-or-url> — check one specific contract (raw 0x address, OpenSea/Zora/explorer URL) and run it through the same safety pipeline as auto-discovery",
+      "/upcoming — every known drop's status: live & free, live but paid, upcoming (with countdown), not just ready-to-mint ones",
       "/prepared — list mints ready to broadcast",
       "/mint <index> — mint to YOUR registered address (re-verifies free/open/limit)",
       "/sign <index> — build the EXACT transaction for your wallet to sign (non-custodial; you keep your key)",
@@ -159,6 +184,27 @@ export class TelegramCommandBot {
     } catch (error) {
       return `TARGET CHECK FAILED: ${(error as Error).message}`;
     }
+  }
+
+  private async upcoming(): Promise<string> {
+    if (!this.deps.dropStatus) return "Drop status tracking isn't wired up on this bot.";
+    const all = await this.deps.dropStatus.list();
+    if (!all.length) return "No known drops yet — run /scan a few times to build up the list.";
+
+    const now = Math.floor(Date.now() / 1000);
+    const upcoming = all.filter((d) => d.status === "upcoming").sort((a, b) => a.startTime - b.startTime).slice(0, 10);
+    const liveFree = all.filter((d) => d.status === "live_free").slice(0, 10);
+    const livePaid = all.filter((d) => d.status === "live_paid").slice(0, 5);
+    const endedCount = all.filter((d) => d.status === "ended").length;
+
+    if (!upcoming.length && !liveFree.length && !livePaid.length) return "Nothing upcoming or live right now — check back after the next scan.";
+
+    const lines = ["Known drops"];
+    if (upcoming.length) lines.push("", `UPCOMING (${upcoming.length}):`, ...upcoming.map((d) => formatDropStatus(d, now)));
+    if (liveFree.length) lines.push("", `LIVE & FREE (${liveFree.length}):`, ...liveFree.map((d) => formatDropStatus(d, now)));
+    if (livePaid.length) lines.push("", `LIVE, NOT FREE (${livePaid.length}):`, ...livePaid.map((d) => formatDropStatus(d, now)));
+    if (endedCount) lines.push("", `${endedCount} ended drop(s) not shown.`);
+    return lines.join("\n");
   }
 
   private async prepared(): Promise<string> {

@@ -3,6 +3,8 @@ import type { Address, PublicClient } from "viem";
 import { SEADROP_ADDRESS, SeaDropDiscoverySource } from "../src/discovery/rpc/seadrop-source";
 import type { BlockCursorStore } from "../src/discovery/rpc/block-cursor";
 import type { ContractRegistry } from "../src/discovery/rpc/contract-registry";
+import type { DropStatusStore } from "../src/domain/ports";
+import type { DropStatus } from "../src/domain/types";
 
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
@@ -56,6 +58,15 @@ function memRegistry(seed: Record<string, Address[]> = {}): ContractRegistry {
       const existing = store.get(key) ?? [];
       if (!existing.includes(contract)) store.set(key, [...existing, contract]);
     },
+  };
+}
+
+function memDropStatusStore(): DropStatusStore & { saved: DropStatus[] } {
+  const saved: DropStatus[] = [];
+  return {
+    saved,
+    save: async (status) => { saved.push(status); },
+    list: async () => saved,
   };
 }
 
@@ -282,5 +293,79 @@ describe("SeaDropDiscoverySource", () => {
     }
     // 3 passes x 4 per pass = 12 checks against 10 contracts — every one should have come up at least once.
     expect(seen.size).toBe(10);
+  });
+
+  describe("dropStatusStore", () => {
+    test("records live_free for a currently free + open drop, in addition to surfacing a candidate", async () => {
+      const cursor = memCursor();
+      const dropStatusStore = memDropStatusStore();
+      const client = fakeClient({ latest: 1000n, mintedContracts: [CONTRACT_A], drops: { [CONTRACT_A]: freeOpenDrop() } });
+      const source = new SeaDropDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, confirmations: 2n, dropStatusStore });
+
+      const candidates = await source.discover();
+      expect(candidates.length).toBe(1);
+      expect(dropStatusStore.saved.length).toBe(1);
+      expect(dropStatusStore.saved[0]).toMatchObject({ id: "ethereum:" + CONTRACT_A, chainKey: "ethereum", nftContract: CONTRACT_A, status: "live_free", mintPriceWei: "0" });
+    });
+
+    test("records live_paid for a drop that's open but costs something, without surfacing a candidate", async () => {
+      const cursor = memCursor();
+      const dropStatusStore = memDropStatusStore();
+      const client = fakeClient({ latest: 1000n, mintedContracts: [CONTRACT_A], drops: { [CONTRACT_A]: freeOpenDrop({ mintPrice: 1000000000000000n }) } });
+      const source = new SeaDropDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, confirmations: 2n, dropStatusStore });
+
+      expect(await source.discover()).toEqual([]);
+      expect(dropStatusStore.saved[0]).toMatchObject({ status: "live_paid", mintPriceWei: "1000000000000000" });
+    });
+
+    test("records upcoming for a drop whose start time hasn't arrived yet", async () => {
+      const cursor = memCursor();
+      const dropStatusStore = memDropStatusStore();
+      const now = Math.floor(Date.now() / 1000);
+      const client = fakeClient({ latest: 1000n, mintedContracts: [CONTRACT_A], drops: { [CONTRACT_A]: freeOpenDrop({ startTime: now + 3600, endTime: now + 7200 }) } });
+      const source = new SeaDropDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, confirmations: 2n, dropStatusStore });
+
+      expect(await source.discover()).toEqual([]);
+      expect(dropStatusStore.saved[0]).toMatchObject({ status: "upcoming" });
+    });
+
+    test("records ended for a drop whose end time has already passed", async () => {
+      const cursor = memCursor();
+      const dropStatusStore = memDropStatusStore();
+      const now = Math.floor(Date.now() / 1000);
+      const client = fakeClient({ latest: 1000n, mintedContracts: [CONTRACT_A], drops: { [CONTRACT_A]: freeOpenDrop({ startTime: now - 7200, endTime: now - 3600 }) } });
+      const source = new SeaDropDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, confirmations: 2n, dropStatusStore });
+
+      expect(await source.discover()).toEqual([]);
+      expect(dropStatusStore.saved[0]).toMatchObject({ status: "ended" });
+    });
+
+    test("does not record a status for an unset mapping entry (not a real SeaDrop drop)", async () => {
+      const cursor = memCursor();
+      const dropStatusStore = memDropStatusStore();
+      const client = fakeClient({ latest: 1000n, mintedContracts: [CONTRACT_A] }); // no drops entry -> UNSET_DROP
+      const source = new SeaDropDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, confirmations: 2n, dropStatusStore });
+
+      expect(await source.discover()).toEqual([]);
+      expect(dropStatusStore.saved.length).toBe(0);
+    });
+
+    test("still records live_free for a restricted drop with no allowed recipients (informational, even though no candidate can be built)", async () => {
+      const cursor = memCursor();
+      const dropStatusStore = memDropStatusStore();
+      const client = fakeClient({ latest: 1000n, mintedContracts: [CONTRACT_A], drops: { [CONTRACT_A]: freeOpenDrop({ restrictFeeRecipients: true }) } });
+      const source = new SeaDropDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, confirmations: 2n, dropStatusStore });
+
+      expect(await source.discover()).toEqual([]);
+      expect(dropStatusStore.saved[0]).toMatchObject({ status: "live_free" });
+    });
+
+    test("does nothing when no dropStatusStore is configured", async () => {
+      const cursor = memCursor();
+      const client = fakeClient({ latest: 1000n, mintedContracts: [CONTRACT_A], drops: { [CONTRACT_A]: freeOpenDrop() } });
+      const source = new SeaDropDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, confirmations: 2n });
+      const candidates = await source.discover();
+      expect(candidates.length).toBe(1); // unaffected — just no status persisted anywhere
+    });
   });
 });

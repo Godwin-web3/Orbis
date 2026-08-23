@@ -61,6 +61,8 @@ Runs alongside whichever `DISCOVERY_MODE` is configured (set `SEADROP_DISCOVERY=
 
 A `SeaDropMint` event only fires when *someone else* mints — a drop can be free and open right now with nobody minting it in this particular scan's block window. To avoid missing those, every contract this source has ever seen is remembered (`ContractRegistry` — JSONL file locally, Supabase's `kv_state` table on a persistent deployment, capped at 200 contracts per chain) and re-checked on every scan, not just ones with a fresh mint event.
 
+Every contract checked here also gets its full status recorded (`DropStatus` — live free, live but paid, upcoming, or ended), not just the ones that pass every check and become a ready-to-mint candidate — see the `/upcoming` command below.
+
 ### Etherscan-backed discovery (optional, recommended for Ethereum)
 
 Set `ETHERSCAN_API_KEY` (free at [etherscan.io/apis](https://etherscan.io/apis)) and both the general block-mode scanner and SeaDrop discovery switch from raw `eth_getLogs` to Etherscan's unified v2 API (`src/discovery/rpc/etherscan-logs.ts`) for the chains listed in `ETHERSCAN_CHAINS` (default: `ethereum` only). This removes two restrictions free public RPC nodes impose on Ethereum specifically: rejecting address-less log queries (so the general scanner no longer falls back to the much weaker "new contract deployment only" method) and capping block range to avoid archive-node requirements (so the per-scan range widens from 50 to 5000 blocks, letting SeaDrop's registry backfill from real mint history instead of only live events). Etherscan's API key works the same way across every Etherscan-family explorer (Basescan, Arbiscan, etc.) via the `chainid` query param, so `ETHERSCAN_CHAINS` can list more chains later without any code change.
@@ -122,6 +124,7 @@ Commands:
 | `/register <address>` | Set the receive address for this chat — free mints via `/mint` land here; no private key needed |
 | `/scan` **[admin]** | Run a discovery + simulation + prepare pass over enabled chains |
 | `/target <address-or-url>` | Check one specific contract you already know about — raw `0x` address, OpenSea asset URL, Zora URL, or a block explorer's address URL — through the same classify/simulate/policy pipeline as auto-discovery |
+| `/upcoming` | Every known drop's status — live & free, live but paid, upcoming (with a countdown), or ended — not just the ones that already qualify as a ready-to-mint candidate |
 | `/prepared` | List mints approved by policy that are ready to broadcast |
 | `/mint <index>` | Mint to YOUR registered address: a fleet wallet mints (pays gas), then transfers the NFT to you |
 | `/sign <index>` | Build the EXACT transaction for your wallet to sign — non-custodial, your key stays on your device |

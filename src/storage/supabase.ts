@@ -1,7 +1,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { privateKeyToAccount } from "viem/accounts";
-import type { CandidateStore, PreparedTransactionStore } from "../domain/ports";
-import type { Address, MintCandidate, PreparedTransaction } from "../domain/types";
+import type { CandidateStore, DropStatusStore, PreparedTransactionStore } from "../domain/ports";
+import type { Address, DropStatus, MintCandidate, PreparedTransaction } from "../domain/types";
 import type { RegisteredUser, UserRegistry } from "../users/registry";
 import type { UserKeyStore } from "../users/keystore";
 import type { AutoMintAttempt, AutoMintLog } from "../execution/automint";
@@ -10,12 +10,13 @@ import { CONTRACT_REGISTRY_CAP, type ContractRegistry } from "../discovery/rpc/c
 import { decryptSecret, encryptSecret } from "../users/crypto";
 
 /**
- * All persistence adapters for running Orbis on Cloudflare Workers, where there's no
- * filesystem for the JSONL stores used by the long-polling bot. Every class here
- * implements the same port/interface as its Jsonl counterpart, so engine and bot code
- * are unchanged — only the wiring at the entrypoint differs. Callers must pass a client
- * built with the Supabase **service role** key (never the publishable/anon key): these
- * tables have RLS enabled with no policies, i.e. default-deny for anything else.
+ * All persistence adapters for running Orbis on a host with no reliable local filesystem
+ * (a Render service's disk isn't guaranteed to survive a restart or redeploy) instead of
+ * the JSONL stores used by scripts/telegram-bot.ts. Every class here implements the same
+ * port/interface as its Jsonl counterpart, so engine and bot code are unchanged — only the
+ * wiring at the entrypoint differs. Callers must pass a client built with the Supabase
+ * **service role** key (never the publishable/anon key): these tables have RLS enabled
+ * with no policies, i.e. default-deny for anything else.
  */
 export function createSupabaseClient(url: string, serviceRoleKey: string): SupabaseClient {
   return createClient(url, serviceRoleKey, { auth: { persistSession: false } });
@@ -258,5 +259,21 @@ export class SupabaseContractRegistry implements ContractRegistry {
     const contracts = [...existing, contract].slice(-CONTRACT_REGISTRY_CAP);
     const { error } = await this.db.from("kv_state").upsert({ key: `contract_registry:${key}`, value: { contracts }, updated_at: new Date().toISOString() });
     if (error) throw new Error(`Supabase kv_state upsert failed: ${error.message}`);
+  }
+}
+
+/** Latest known status per drop (live free/paid, upcoming, ended), one kv_state row per drop. See DropStatus's doc comment for why this exists. */
+export class SupabaseDropStatusStore implements DropStatusStore {
+  constructor(private readonly db: SupabaseClient) {}
+
+  async save(status: DropStatus): Promise<void> {
+    const { error } = await this.db.from("kv_state").upsert({ key: `drop_status:${status.id}`, value: status, updated_at: new Date().toISOString() });
+    if (error) throw new Error(`Supabase kv_state upsert failed: ${error.message}`);
+  }
+
+  async list(): Promise<DropStatus[]> {
+    const { data, error } = await this.db.from("kv_state").select("value").like("key", "drop_status:%");
+    if (error) throw new Error(`Supabase kv_state list failed: ${error.message}`);
+    return (data ?? []).map((row) => row.value as DropStatus);
   }
 }

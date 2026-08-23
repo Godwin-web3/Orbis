@@ -37,6 +37,7 @@ import {
   SupabaseBlockCursorStore,
   SupabaseCandidateStore,
   SupabaseContractRegistry,
+  SupabaseDropStatusStore,
   SupabasePreparedTransactionStore,
   SupabaseUserKeyStore,
   SupabaseUserRegistry,
@@ -62,6 +63,7 @@ async function main() {
   const candidateStore = new SupabaseCandidateStore(db);
   const blockCursor = new SupabaseBlockCursorStore(db);
   const contractRegistry = new SupabaseContractRegistry(db);
+  const dropStatusStore = new SupabaseDropStatusStore(db);
 
   const fleetKeys = splitKeys(process.env.FLEET_PRIVATE_KEYS ?? "");
   const relay = fleetKeys.length ? new MintRelay(new WalletFleet(fleetKeys)) : undefined;
@@ -76,7 +78,7 @@ async function main() {
   const encryptionKeyHex = process.env.AUTO_MINT_ENCRYPTION_KEY ?? "";
   const keystore = encryptionKeyHex ? new SupabaseUserKeyStore(db, parseEncryptionKey(encryptionKeyHex)) : undefined;
 
-  const runtimeOverrides = { candidateStore, preparedStore: prepared, notifications: [new ConsoleNotificationSink()], blockCursor, contractRegistry };
+  const runtimeOverrides = { candidateStore, preparedStore: prepared, notifications: [new ConsoleNotificationSink()], blockCursor, contractRegistry, dropStatusStore };
 
   const bot = new TelegramCommandBot(token, allowed, {
     prepared,
@@ -87,6 +89,7 @@ async function main() {
     keystore,
     chainsEnabled,
     guard,
+    dropStatus: dropStatusStore,
     scan: async () => {
       const engine = buildRuntime(runtimeOverrides);
       const result = await engine.run();
