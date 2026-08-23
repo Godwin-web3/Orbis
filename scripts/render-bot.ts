@@ -1,12 +1,11 @@
 // Always-on Telegram bot for a persistent host (deployed as a Render free Web Service, or
-// any other machine that can run a long-lived Bun process) — no CPU-time-per-invocation
-// limit, unlike Cloudflare Workers (see worker/index.ts's doc comments for that whole saga).
-// Same command set as scripts/telegram-bot.ts, but Supabase-backed throughout instead of
-// local JSONL files, since a Render service's disk isn't guaranteed to persist across
-// restarts/redeploys the way a real server's would. Also folds back in the periodic
-// discovery scan + auto-mint loop that a persistent process can run directly with
-// setInterval — Cloudflare's Cron Trigger existed only because Workers has no persistent
-// process to host that loop in.
+// any other machine that can run a long-lived Bun process) — real on-chain discovery work
+// (ABI encoding, checksum validation, decoding responses across multiple chains) needs a
+// genuine persistent process, not a platform metered in milliseconds of CPU time per
+// request. Same command set as scripts/telegram-bot.ts, but Supabase-backed throughout
+// instead of local JSONL files, since a Render service's disk isn't guaranteed to persist
+// across restarts/redeploys the way a real server's would. Also runs the periodic discovery
+// scan + auto-mint loop directly via setInterval, since a persistent process can just do that.
 //
 // Render's free tier only applies to "Web Service" instances (Background Workers require
 // a paid plan), and a Web Service needs to actually serve HTTP — Render marks it unhealthy,

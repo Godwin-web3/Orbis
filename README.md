@@ -53,13 +53,13 @@ The simulator deliberately does not claim that a plain `eth_call` proves post-st
 ## Discovery modes
 
 - `DISCOVERY_MODE=contracts` (default) — only checks the addresses you list in each chain's `*_CONTRACTS` env var.
-- `DISCOVERY_MODE=blocks` — auto-discovers mints without a curated list, by watching for **ERC-721 `Transfer` events where `from` is the zero address** (`src/discovery/rpc/block-source.ts`) — that event *is* a mint, emitted by any contract, new or deployed long ago, the moment someone mints from it. A single `eth_getLogs` call covers a whole block range per scan (capped at 50 blocks, retried at 10 on a provider error), and a persisted per-chain cursor (`BlockCursorStore` — JSONL file locally, Supabase's `kv_state` table on the Worker) tracks the last block scanned so consecutive scans cover contiguous ranges instead of missing everything between runs.
+- `DISCOVERY_MODE=blocks` — auto-discovers mints without a curated list, by watching for **ERC-721 `Transfer` events where `from` is the zero address** (`src/discovery/rpc/block-source.ts`) — that event *is* a mint, emitted by any contract, new or deployed long ago, the moment someone mints from it. A single `eth_getLogs` call covers a whole block range per scan (capped at 50 blocks, retried at 10 on a provider error), and a persisted per-chain cursor (`BlockCursorStore` — JSONL file locally, Supabase's `kv_state` table on a persistent deployment) tracks the last block scanned so consecutive scans cover contiguous ranges instead of missing everything between runs.
 
 ### SeaDrop discovery
 
 Runs alongside whichever `DISCOVERY_MODE` is configured (set `SEADROP_DISCOVERY=off` to disable it). `src/discovery/rpc/seadrop-source.ts` watches OpenSea's SeaDrop singleton contract (`0x00005EA00Ac477B1030CE78506496e8C2dE24bf5` — identical address on Ethereum, Base, and Robinhood Chain) for `SeaDropMint` events, then reads that contract's *current* `getPublicDrop()` config directly on-chain before surfacing a candidate — so a mint only surfaces while it is genuinely free and inside its open window, not just "something minted here recently." Because the query is scoped to the SeaDrop address it works within free RPC providers' restriction on address-less `eth_getLogs` calls. It pre-builds the exact `mintPublic(...)` calldata itself, so it only catches SeaDrop-launched collections — a large share of real free mints, but not all of them — which is why it runs as an addition, not a replacement.
 
-A `SeaDropMint` event only fires when *someone else* mints — a drop can be free and open right now with nobody minting it in this particular scan's block window. To avoid missing those, every contract this source has ever seen is remembered (`ContractRegistry` — JSONL file locally, Supabase's `kv_state` table on the Worker, capped at 200 contracts per chain) and re-checked on every scan, not just ones with a fresh mint event.
+A `SeaDropMint` event only fires when *someone else* mints — a drop can be free and open right now with nobody minting it in this particular scan's block window. To avoid missing those, every contract this source has ever seen is remembered (`ContractRegistry` — JSONL file locally, Supabase's `kv_state` table on a persistent deployment, capped at 200 contracts per chain) and re-checked on every scan, not just ones with a fresh mint event.
 
 ### Etherscan-backed discovery (optional, recommended for Ethereum)
 
@@ -205,78 +205,35 @@ AUTO_MINT_MAX_TOTAL_PER_SCAN=10
 bun run telegram-bot
 ```
 
-## Persistent deployment (Render) — recommended
+## Persistent deployment (Render)
 
-Cloudflare Workers' free plan caps CPU time at **10ms per invocation** — real time spent waiting on RPC/API responses doesn't count against that, but the actual computation around them (ABI encoding, address checksum validation, JSON parsing, decoding responses) does, and a genuine multi-chain discovery pass routinely needs more than 10ms of that. Once discovery is finding real candidates, Cloudflare kills the invocation mid-scan (`"outcome": "exceededCpu"` in Observability) before it can reply or save anything. There's no reliable way to keep real on-chain verification work under a 10ms compute budget, so this deployment path exists for cases where a persistent process isn't an option; **Render's free tier is the recommended path** for the interactive bot.
+`scripts/render-bot.ts` is `scripts/telegram-bot.ts`'s command set, Supabase-backed instead of local JSONL files (a Render service's disk isn't guaranteed to survive a restart or redeploy), plus the periodic discovery-scan and auto-mint loops folded back in as plain `setInterval`s. Real on-chain discovery work (ABI encoding, checksum validation, decoding RPC/Etherscan responses across multiple chains) needs a genuine persistent process — a serverless platform metered in milliseconds of CPU time per request isn't a fit for it.
 
-`scripts/render-bot.ts` is `scripts/telegram-bot.ts`'s command set, Supabase-backed instead of local JSONL files (a Render service's disk isn't guaranteed to survive a restart or redeploy), plus the periodic discovery-scan and auto-mint loops folded back in as plain `setInterval`s — a real, persistent process has no per-invocation CPU limit to design around.
+Render's free tier only covers the **Web Service** instance type (Background Workers require a paid plan). A Web Service needs to actually serve HTTP or Render marks it unhealthy, and free web services spin down after 15 minutes with no *inbound* request — which is all this process would otherwise see, since it talks to Telegram via outbound long-polling, never an inbound webhook. `scripts/render-bot.ts` binds a trivial HTTP server (`minimalHealthServer()`) purely to satisfy Render's health check, and `.github/workflows/render-keepalive.yml` pings it every 10 minutes (comfortably inside the 15-minute window) so the service never spins down.
 
-Render's free tier only covers the **Web Service** instance type — Background Workers require a paid plan. A Web Service needs to actually serve HTTP or Render marks it unhealthy, and free web services spin down after 15 minutes with no *inbound* request — which is all this process would ever see on its own, since it talks to Telegram via outbound long-polling, never an inbound webhook. `scripts/render-bot.ts` binds a trivial HTTP server (`minimalHealthServer()`) purely to satisfy Render's health check, and `.github/workflows/render-keepalive.yml` pings it every 10 minutes (comfortably inside the 15-minute window) so the service never spins down.
+**Currently deployed:** `orbis-telegram-bot` on Render (`https://orbis-telegram-bot.onrender.com`), free plan, auto-deploying from `main`.
 
-**Already deployed as of this write-up:** `orbis-telegram-bot` on Render, workspace `My Workspace`, at `https://orbis-telegram-bot.onrender.com` (service id `srv-da59iq2jobas73e0mblg`), free plan, auto-deploying from `main`. Non-secret config (`ENABLED_CHAINS`, `DISCOVERY_MODE`, `SIMULATION_FROM`, `SUPABASE_URL`, etc.) is already set. Still needed, via Render's dashboard → this service → Environment (secrets aren't something an automated tool should set on your behalf):
-```
-TELEGRAM_BOT_TOKEN
-TELEGRAM_ADMIN_IDS
-SUPABASE_SERVICE_ROLE_KEY
-ROBINHOOD_RPC_URL           # the private Alchemy URL, not the public one
-ETHERSCAN_API_KEY
-```
-Optional, same as the Cloudflare path: `AUTO_MINT_ENCRYPTION_KEY`, `AUTO_MINT_MAX_PER_USER_PER_SCAN`, `AUTO_MINT_MAX_TOTAL_PER_SCAN`, `FLEET_PRIVATE_KEYS`, `EXECUTION_PRIVATE_KEY`, `BATCH_EXECUTOR_ADDRESS`, `SCAN_INTERVAL_MS` (default 120000ms).
+**Setup, for a fresh deploy:**
+1. Render dashboard → New → Web Service, connect the repo. **Runtime:** Node. **Build Command:** `bun install`. **Start Command:** `bun run scripts/render-bot.ts`. **Instance Type:** Free. (Bun ships with Render's Node runtime — no separate install step needed.)
+2. Environment variables (Render dashboard → this service → Environment):
+   ```
+   TELEGRAM_BOT_TOKEN
+   TELEGRAM_ADMIN_IDS
+   SUPABASE_URL
+   SUPABASE_SERVICE_ROLE_KEY     # Supabase dashboard → project → Settings → API
+   ENABLED_CHAINS, DISCOVERY_MODE, CONFIRMATIONS
+   ETHEREUM_RPC_URL, ROBINHOOD_RPC_URL   (or whichever chains are enabled)
+   ETHERSCAN_API_KEY, ETHERSCAN_CHAINS
+   SIMULATION_FROM
+   MAX_GAS_NATIVE, MIN_EXPECTED_VALUE_NATIVE, MAX_MINTS_PER_OPPORTUNITY
+   AUTO_MINT_ENCRYPTION_KEY, AUTO_MINT_MAX_PER_USER_PER_SCAN, AUTO_MINT_MAX_TOTAL_PER_SCAN   (optional)
+   FLEET_PRIVATE_KEYS, EXECUTION_PRIVATE_KEY, BATCH_EXECUTOR_ADDRESS   (optional)
+   SCAN_INTERVAL_MS   (optional, default 120000ms)
+   ```
+3. Deploy. Check the Logs tab for the "Orbis bot started" line.
+4. If Telegram was ever pointed at a webhook, delete it first — Telegram only delivers updates one way at a time (webhook *or* long-polling): visit `https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/deleteWebhook` in a browser and confirm `"ok":true`.
 
-Once those are set, Render redeploys automatically. Check its Logs tab for the "Orbis bot started" line.
-
-**Delete the Cloudflare webhook** so Telegram stops routing updates there and starts delivering them to this long-polling process instead: visit `https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/deleteWebhook` in a browser (a plain GET request — safe to open directly) and confirm `"ok":true`. Telegram only delivers updates one way at a time (webhook *or* long-polling), so this step is required, not optional.
-
-Optional cleanup: pause or delete the Cloudflare Worker's Cron Trigger so it stops attempting (and failing) scans in the background — harmless since it can't complete a scan anyway, but no reason to leave it running.
-
-## Serverless deployment (Cloudflare Workers + Supabase)
-
-Kept for reference, or for a Cloudflare Workers **Paid** plan ($5/month, 30s CPU time by default) where the 10ms constraint above doesn't apply.
-
-`scripts/telegram-bot.ts` needs a process that's always running (long-polling) and a writable filesystem (`data/*.jsonl`). `worker/index.ts` is the same bot re-pointed at a **webhook** and **Postgres**, so it can run on Cloudflare's free tier with no server to keep alive:
-
-| | Always-on (`scripts/telegram-bot.ts`) | Serverless (`worker/index.ts`) |
-| --- | --- | --- |
-| Transport | Long-polling (`getUpdates`) | Telegram webhook → `POST /telegram-webhook` |
-| Storage | `data/*.jsonl` files | Supabase (Postgres) |
-| Scan / auto-mint interval | `setInterval` in the process | Cloudflare Cron Trigger (`scheduled()`), every 2 min by default |
-| Encryption | Web Crypto (`src/users/crypto.ts`) | same — portable to both |
-
-All the command logic (`src/telegram/bot.ts`), execution logic (`executor.ts`/`relay.ts`/`noncustodial.ts`/`automint.ts`), and the multi-user/autonomous features above are **unchanged** — only the storage adapters and the entrypoint differ. `src/storage/supabase.ts` implements the same ports (`UserRegistry`, `UserKeyStore`, `PreparedTransactionStore`, `CandidateStore`, `AutoMintLog`) as their `Jsonl*` counterparts.
-
-**1. Database.** Apply `supabase/migrations/20260822000000_orbis_bot_storage.sql` to a Supabase project (`supabase db push`, or paste it into the SQL editor). This session already provisioned one for Orbis:
-```
-project: orbis (spxobcjspromgfmchmyj)
-url:     https://spxobcjspromgfmchmyj.supabase.co
-```
-Grab the **service_role** key from that project's Settings → API in the Supabase dashboard (deliberately not something any automated tool hands out) — the Worker authenticates as service_role, since these tables have RLS enabled with no policies (default-deny for the publishable/anon key).
-
-**2. Secrets** (`wrangler secret put <NAME>`, one at a time — never committed):
-```
-TELEGRAM_BOT_TOKEN
-TELEGRAM_ADMIN_IDS
-TELEGRAM_WEBHOOK_SECRET      # openssl rand -hex 32 — verifies webhook calls are really from Telegram
-SUPABASE_URL
-SUPABASE_SERVICE_ROLE_KEY
-AUTO_MINT_ENCRYPTION_KEY     # optional, enables /autokey — openssl rand -hex 32
-FLEET_PRIVATE_KEYS           # optional, enables the custodial relay
-EXECUTION_PRIVATE_KEY        # optional, operator's own single-key mint path
-BATCH_EXECUTOR_ADDRESS       # optional, needed for /mint-all
-```
-Plain (non-secret) config — RPC URLs, `ENABLED_CHAINS`, contract lists, policy thresholds — goes in `wrangler.toml`'s `[vars]` block; see `.env.example` for the full list, since every `process.env.*` read in `src/` works identically here (bridged in by `populateProcessEnv()` in `worker/index.ts`, which requires the `nodejs_compat` flag already set in `wrangler.toml`).
-
-A key declared in `[vars]` gets overwritten back to its committed value on *every* deploy — `keep_vars = true` only protects keys that aren't declared there at all. So an RPC URL you want to manage from the dashboard (e.g. a private Alchemy/QuickNode endpoint you don't want in a public repo) must not also appear in `wrangler.toml`'s `[vars]`, or your dashboard edit gets silently reverted the next time you deploy.
-
-**3. Deploy and point Telegram at it:**
-```sh
-bunx wrangler login
-bun run worker:deploy
-# copy the printed *.workers.dev URL, then:
-TELEGRAM_BOT_TOKEN=<token> WORKER_URL=https://orbis-telegram-bot.<subdomain>.workers.dev TELEGRAM_WEBHOOK_SECRET=<same as the secret above> bun run set-webhook
-```
-`bun run delete-webhook` switches Telegram back to no webhook (needed before going back to `bun run telegram-bot`'s long-polling — Telegram only delivers to one or the other). `bun run worker:typecheck` type-checks `worker/` against Workers' types instead of Bun's.
-
-**Constraints worth knowing:** Workers have no persistent process, so the scan/auto-mint interval is now a cron tick (1-minute minimum granularity) instead of `setInterval`; a full discovery pass across many chains/contracts should comfortably fit Workers' free-tier CPU-time limits since RPC round-trips are I/O wait (not billed), but a very large contract list is untested here — watch the Cloudflare dashboard's CPU-time metrics after your first few scheduled runs and trim `ENABLED_CHAINS`/`*_CONTRACTS` if you see timeouts.
+**Database.** Apply `supabase/migrations/20260822000000_orbis_bot_storage.sql` to a Supabase project (`supabase db push`, or paste it into the SQL editor). `src/storage/supabase.ts` implements the same ports (`UserRegistry`, `UserKeyStore`, `PreparedTransactionStore`, `CandidateStore`, `AutoMintLog`, `BlockCursorStore`, `ContractRegistry`) as their `Jsonl*` counterparts — same command logic, execution logic, and multi-user/autonomous features throughout, only the storage adapters differ.
 
 ## Two-mode architecture
 
