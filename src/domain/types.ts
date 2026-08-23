@@ -43,6 +43,7 @@ export type DropStatus = {
   nftContract: Address;
   source: string;
   status: "live_free" | "live_paid" | "upcoming" | "ended" | "unavailable";
+  name?: string; // ERC-721 name(), when the contract implements it
   mintPriceWei: string;
   startTime: number;
   endTime: number;

@@ -6,6 +6,7 @@ import type { UserRegistry } from "../users/registry";
 import type { UserKeyStore } from "../users/keystore";
 import type { MintRelay } from "../execution/relay";
 import type { NonCustodialRelay } from "../execution/noncustodial";
+import { chains } from "../../config/chains";
 
 /** Commands that broadcast fleet-wide, spend the operator's own key, or cost RPC/gas on every user's behalf — restricted to TELEGRAM_ADMIN_IDS. Everything else is open to any chat. */
 export const ADMIN_ONLY_COMMANDS = new Set(["scan", "ack", "mint-all", "mintall"]);
@@ -31,12 +32,22 @@ export function formatCountdown(seconds: number): string {
   return `${minutes}m`;
 }
 
+/** A link a Telegram viewer can actually look at — OpenSea's collection page where OpenSea covers the chain (its rich preview image is why /upcoming turns on link previews), the block explorer otherwise. */
+export function dropLink(chainKey: string, nftContract: string): string | undefined {
+  const chain = chains[chainKey];
+  if (chain?.openseaSlug) return `https://opensea.io/assets/${chain.openseaSlug}/${nftContract}`;
+  return chain?.explorer ? `${chain.explorer}/address/${nftContract}` : undefined;
+}
+
 export function formatDropStatus(status: DropStatus, now: number): string {
-  const base = `  ${status.nftContract} · ${status.chainKey}`;
-  if (status.status === "upcoming") return `${base} · opens in ${formatCountdown(status.startTime - now)}`;
-  if (status.status === "live_free") return `${base} · max ${status.maxTotalMintableByWallet}/wallet${status.endTime ? ` · closes in ${formatCountdown(status.endTime - now)}` : ""}`;
-  if (status.status === "live_paid") return `${base} · ${formatEther(BigInt(status.mintPriceWei))} ETH`;
-  return base;
+  const title = status.name ? `${status.name} (${status.nftContract})` : status.nftContract;
+  const base = `  ${title} · ${status.chainKey}`;
+  const link = dropLink(status.chainKey, status.nftContract);
+  const suffix = link ? `\n    ${link}` : "";
+  if (status.status === "upcoming") return `${base} · opens in ${formatCountdown(status.startTime - now)}${suffix}`;
+  if (status.status === "live_free") return `${base} · max ${status.maxTotalMintableByWallet}/wallet${status.endTime ? ` · closes in ${formatCountdown(status.endTime - now)}` : ""}${suffix}`;
+  if (status.status === "live_paid") return `${base} · ${formatEther(BigInt(status.mintPriceWei))} ETH${suffix}`;
+  return `${base}${suffix}`;
 }
 
 export function formatPrepared(tx: PreparedTransaction, index: number): string {
@@ -82,15 +93,18 @@ export class TelegramCommandBot {
     return response.json();
   }
 
-  private async send(chatId: string, text: string): Promise<void> {
+  private async send(chatId: string, text: string, showLinkPreview = false): Promise<void> {
     const chunks = text.match(/.{1,4000}(?:\s|$)/g) ?? [text];
-    for (const chunk of chunks) await this.api("sendMessage", { chat_id: chatId, text: chunk, disable_web_page_preview: true });
+    for (const chunk of chunks) await this.api("sendMessage", { chat_id: chatId, text: chunk, disable_web_page_preview: !showLinkPreview });
   }
 
   private authorized(chatId: string): boolean { return this.allowedChatIds.includes(chatId); }
 
   /** Public wrapper so background loops (e.g. AutoMintLoop) can message a user's chat. */
   async sendTo(chatId: string, text: string): Promise<void> { return this.send(chatId, text); }
+
+  /** Link previews only matter for the handful of commands whose output includes an OpenSea/explorer link — enabling it elsewhere would just render an unrelated preview for the operator's own bot-token-looking text or similar noise. */
+  private static readonly COMMANDS_WITH_LINK_PREVIEW = new Set(["upcoming", "target"]);
 
   async handleCommand(chatId: string, parsed: ParsedCommand, meta: { messageId?: number; chatType?: string } = {}): Promise<string> {
     switch (parsed.command) {
@@ -390,7 +404,7 @@ export class TelegramCommandBot {
           }
           try {
             const reply = await this.handleCommand(chatId, parsed, { messageId: message.message_id, chatType: message.chat.type });
-            await this.send(chatId, reply);
+            await this.send(chatId, reply, TelegramCommandBot.COMMANDS_WITH_LINK_PREVIEW.has(parsed.command));
           } catch (error) {
             await this.send(chatId, `ERROR: ${(error as Error).message}`);
           }

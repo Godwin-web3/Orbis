@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseCommand, formatPrepared, formatCountdown, formatDropStatus, ADMIN_ONLY_COMMANDS, TelegramCommandBot } from "../src/telegram/bot";
+import { parseCommand, formatPrepared, formatCountdown, formatDropStatus, dropLink, ADMIN_ONLY_COMMANDS, TelegramCommandBot } from "../src/telegram/bot";
 import type { DropStatus, PreparedTransaction } from "../src/domain/types";
 import type { DropStatusStore, PreparedTransactionStore } from "../src/domain/ports";
 import type { UserRegistry } from "../src/users/registry";
@@ -165,6 +165,31 @@ describe("formatDropStatus", () => {
   test("live_paid shows the price in ETH", () => {
     const out = formatDropStatus({ ...base, status: "live_paid", mintPriceWei: "1000000000000000" }, 1000);
     expect(out).toContain("0.001 ETH");
+  });
+  test("includes the collection name in the title when known", () => {
+    const out = formatDropStatus({ ...base, name: "Cool Cats" }, 1000);
+    expect(out).toContain("Cool Cats (0x0000000000000000000000000000000000000001)");
+  });
+  test("falls back to the bare contract address when no name is known", () => {
+    const out = formatDropStatus(base, 1000);
+    expect(out).not.toContain("undefined");
+    expect(out).toContain("0x0000000000000000000000000000000000000001");
+  });
+  test("appends the drop's OpenSea/explorer link", () => {
+    const out = formatDropStatus(base, 1000);
+    expect(out).toContain("https://opensea.io/assets/ethereum/0x0000000000000000000000000000000000000001");
+  });
+});
+
+describe("dropLink", () => {
+  test("builds an OpenSea link when the chain has an OpenSea slug", () => {
+    expect(dropLink("base", "0xabc")).toBe("https://opensea.io/assets/base/0xabc");
+  });
+  test("falls back to the block explorer when OpenSea doesn't cover the chain", () => {
+    expect(dropLink("sepolia", "0xabc")).toBe("https://sepolia.etherscan.io/address/0xabc");
+  });
+  test("returns undefined for an unknown chain", () => {
+    expect(dropLink("nope", "0xabc")).toBeUndefined();
   });
 });
 

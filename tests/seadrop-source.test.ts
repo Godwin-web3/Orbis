@@ -75,6 +75,7 @@ function fakeClient(opts: {
   mintedContracts?: `0x${string}`[];
   drops?: Record<string, PublicDrop>;
   allowedFeeRecipients?: Record<string, `0x${string}`[]>;
+  names?: Record<string, string>;
   getLogsThrows?: boolean;
 }): PublicClient {
   return {
@@ -83,7 +84,12 @@ function fakeClient(opts: {
       if (opts.getLogsThrows) throw new Error("Please specify an address in your request");
       return (opts.mintedContracts ?? []).map((nftContract) => ({ args: { nftContract, minter: "0x1", feeRecipient: OPENSEA_FEE_RECIPIENT } }));
     },
-    readContract: async ({ functionName, args }: { functionName: string; args: unknown[] }) => {
+    readContract: async ({ address, functionName, args }: { address: string; functionName: string; args: unknown[] }) => {
+      if (functionName === "name") {
+        const name = opts.names?.[address.toLowerCase()];
+        if (name === undefined) throw new Error("contract does not implement name()");
+        return name;
+      }
       const nftContract = (args[0] as string).toLowerCase();
       if (functionName === "getPublicDrop") return (opts.drops?.[nftContract] ?? UNSET_DROP) as unknown;
       if (functionName === "getAllowedFeeRecipients") return (opts.allowedFeeRecipients?.[nftContract] ?? []) as unknown;
@@ -366,6 +372,39 @@ describe("SeaDropDiscoverySource", () => {
       const source = new SeaDropDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, confirmations: 2n });
       const candidates = await source.discover();
       expect(candidates.length).toBe(1); // unaffected — just no status persisted anywhere
+    });
+
+    test("includes the collection's on-chain name() when the contract implements it", async () => {
+      const cursor = memCursor();
+      const dropStatusStore = memDropStatusStore();
+      const client = fakeClient({ latest: 1000n, mintedContracts: [CONTRACT_A], drops: { [CONTRACT_A]: freeOpenDrop() }, names: { [CONTRACT_A]: "Cool Cats Reloaded" } });
+      const source = new SeaDropDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, confirmations: 2n, dropStatusStore });
+
+      const candidates = await source.discover();
+      expect(dropStatusStore.saved[0].name).toBe("Cool Cats Reloaded");
+      expect(candidates[0].metadata.name).toBe("Cool Cats Reloaded");
+    });
+
+    test("omits name when the contract doesn't implement name() (optional in the ERC-721 spec)", async () => {
+      const cursor = memCursor();
+      const dropStatusStore = memDropStatusStore();
+      const client = fakeClient({ latest: 1000n, mintedContracts: [CONTRACT_A], drops: { [CONTRACT_A]: freeOpenDrop() } }); // no `names` entry
+      const source = new SeaDropDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, confirmations: 2n, dropStatusStore });
+
+      await source.discover();
+      expect(dropStatusStore.saved[0].name).toBeUndefined();
+    });
+
+    test("skips the name() call entirely when no dropStatusStore is configured (nothing to show it)", async () => {
+      const cursor = memCursor();
+      let nameCalled = false;
+      const client = fakeClient({ latest: 1000n, mintedContracts: [CONTRACT_A], drops: { [CONTRACT_A]: freeOpenDrop() }, names: { [CONTRACT_A]: "Should Not Be Read" } });
+      const originalReadContract = (client as any).readContract;
+      (client as any).readContract = async (args: any) => { if (args.functionName === "name") nameCalled = true; return originalReadContract(args); };
+      const source = new SeaDropDiscoverySource({ chainKey: "ethereum", rpcUrls: [], client, cursor, confirmations: 2n });
+
+      await source.discover();
+      expect(nameCalled).toBe(false);
     });
   });
 });
