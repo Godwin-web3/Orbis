@@ -47,6 +47,31 @@ describe("formatPrepared", () => {
     expect(out).toContain("[0] PASS");
     expect(out).toContain(tx.to);
     expect(out).toContain("publicMint");
+    expect(out).toContain("Base"); // chain name resolved from chainId, not the raw id
+  });
+  test("omits the reasons suffix when there are none", () => {
+    expect(formatPrepared(tx, 0)).not.toContain("reasons:");
+  });
+  test("shows reasons when present", () => {
+    const out = formatPrepared({ ...tx, policy: "SKIP", reasons: ["expected value is below configured threshold"] }, 0);
+    expect(out).toContain("reasons: expected value is below configured threshold");
+  });
+  test("shows the real NFT collection's name and link instead of the router contract, when known", () => {
+    const nftContract = "0x0000000000000000000000000000000000000009" as `0x${string}`;
+    const out = formatPrepared({ ...tx, name: "Cool Cats", nftContract }, 0);
+    expect(out).toContain(`Cool Cats (${nftContract})`);
+    expect(out).not.toContain(tx.to); // the SeaDrop router address shouldn't be shown once we know the real collection
+    expect(out).toContain("https://opensea.io/assets/base/" + nftContract);
+  });
+  test("falls back to the called contract when no nftContract/name is known", () => {
+    const out = formatPrepared(tx, 0);
+    expect(out).toContain(tx.to);
+  });
+  test("shows gas price in gwei and total cost in ETH, not raw wei", () => {
+    const out = formatPrepared(tx, 0);
+    expect(out).toContain("1.0000 gwei");
+    expect(out).toContain("0.0001 ETH");
+    expect(out).not.toContain("1000000000 wei");
   });
 });
 

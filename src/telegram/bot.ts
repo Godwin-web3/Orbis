@@ -6,7 +6,9 @@ import type { UserRegistry } from "../users/registry";
 import type { UserKeyStore } from "../users/keystore";
 import type { MintRelay } from "../execution/relay";
 import type { NonCustodialRelay } from "../execution/noncustodial";
-import { chains } from "../../config/chains";
+import { capitalize, chainNameFor, dropLink } from "../chains/registry";
+
+export { dropLink };
 
 /** Commands that broadcast fleet-wide, spend the operator's own key, or cost RPC/gas on every user's behalf — restricted to TELEGRAM_ADMIN_IDS. Everything else is open to any chat. */
 export const ADMIN_ONLY_COMMANDS = new Set(["scan", "ack", "mint-all", "mintall"]);
@@ -32,16 +34,9 @@ export function formatCountdown(seconds: number): string {
   return `${minutes}m`;
 }
 
-/** A link a Telegram viewer can actually look at — OpenSea's collection page where OpenSea covers the chain (its rich preview image is why /upcoming turns on link previews), the block explorer otherwise. */
-export function dropLink(chainKey: string, nftContract: string): string | undefined {
-  const chain = chains[chainKey];
-  if (chain?.openseaSlug) return `https://opensea.io/assets/${chain.openseaSlug}/${nftContract}`;
-  return chain?.explorer ? `${chain.explorer}/address/${nftContract}` : undefined;
-}
-
 export function formatDropStatus(status: DropStatus, now: number): string {
   const title = status.name ? `${status.name} (${status.nftContract})` : status.nftContract;
-  const base = `  ${title} · ${status.chainKey}`;
+  const base = `  ${title} · ${capitalize(status.chainKey)}`;
   const link = dropLink(status.chainKey, status.nftContract);
   const suffix = link ? `\n    ${link}` : "";
   if (status.status === "upcoming") return `${base} · opens in ${formatCountdown(status.startTime - now)}${suffix}`;
@@ -51,14 +46,29 @@ export function formatDropStatus(status: DropStatus, now: number): string {
   return `${base}${suffix}`;
 }
 
+/** { title, link } for a prepared/executing mint — the real NFT collection (name + its own
+ * contract) when known, falling back to the router/contract the transaction actually calls
+ * against (e.g. OpenSea's shared SeaDrop address) when discovery couldn't attach richer
+ * metadata (non-SeaDrop sources, or a /target lookup that didn't resolve a name). */
+function describeMint(tx: PreparedTransaction): { title: string; link?: string } {
+  const contract = tx.nftContract ?? tx.to;
+  const title = tx.name ? `${tx.name} (${contract})` : contract;
+  return { title, link: dropLink(tx.chainKey, contract) };
+}
+
 export function formatPrepared(tx: PreparedTransaction, index: number): string {
-  return [
-    `[${index}] ${tx.policy} · ${tx.chainId === 1 ? "Ethereum" : "chain " + tx.chainId}`,
-    `  contract: ${tx.to}`,
-    `  fn: ${tx.mintFunction ?? "unknown"} · gas: ${tx.gas.toString()} · price: ${tx.gasPriceWei} wei`,
-    `  sim: ${tx.simulationMode} · reasons: ${tx.reasons.length ? tx.reasons.join("; ") : "none"}`,
+  const { title, link } = describeMint(tx);
+  const gasCostNative = formatEther(tx.gas * tx.gasPriceWei);
+  const gasPriceGwei = (Number(tx.gasPriceWei) / 1e9).toFixed(4);
+  const lines = [
+    `[${index}] ${tx.policy} · ${chainNameFor(tx.chainId)}`,
+    `  ${title}`,
+    ...(link ? [`  ${link}`] : []),
+    `  fn: ${tx.mintFunction ?? "unknown"} · gas: ${tx.gas.toString()} @ ${gasPriceGwei} gwei (~${gasCostNative} ETH)`,
+    `  sim: ${tx.simulationMode}${tx.reasons.length ? ` · reasons: ${tx.reasons.join("; ")}` : ""}`,
     `  prepared: ${tx.preparedAt}`,
-  ].join("\n");
+  ];
+  return lines.join("\n");
 }
 
 export class TelegramCommandBot {
@@ -105,7 +115,7 @@ export class TelegramCommandBot {
   async sendTo(chatId: string, text: string): Promise<void> { return this.send(chatId, text); }
 
   /** Link previews only matter for the handful of commands whose output includes an OpenSea/explorer link — enabling it elsewhere would just render an unrelated preview for the operator's own bot-token-looking text or similar noise. */
-  private static readonly COMMANDS_WITH_LINK_PREVIEW = new Set(["upcoming", "target"]);
+  private static readonly COMMANDS_WITH_LINK_PREVIEW = new Set(["upcoming", "target", "scan", "prepared", "mint", "sign", "submit"]);
 
   async handleCommand(chatId: string, parsed: ParsedCommand, meta: { messageId?: number; chatType?: string } = {}): Promise<string> {
     switch (parsed.command) {
@@ -160,7 +170,7 @@ export class TelegramCommandBot {
     const autoUsers = this.deps.keystore ? (await this.deps.keystore.listEnabled()).length : 0;
     const lines = [
       "Free Mint Engine — status",
-      `chains: ${this.deps.chainsEnabled.join(", ") || "none"}`,
+      `chains: ${this.deps.chainsEnabled.map(capitalize).join(", ") || "none"}`,
       `fleet wallets: ${this.deps.relay ? this.deps.relay.fleetSize : 0} · executor: ${this.deps.executor?.address ?? "(none)"}`,
       `guard: ${this.deps.guard.get() ? "ON" : "OFF"}`,
       `registered users: ${users.length}`,
@@ -241,13 +251,16 @@ export class TelegramCommandBot {
     const pass = prepared.filter((tx) => tx.policy === "PASS");
     if (index >= pass.length) return `Index ${index} out of range (${pass.length} prepared).`;
     const tx = pass[index];
+    const { title, link } = describeMint(tx);
     try {
       if (this.deps.relay) {
         const user = await this.deps.users.addressFor(chatId);
         if (!user) return "You haven't registered a receive address. Run /register <0x...address> first.";
         const result = await this.deps.relay.mintFor(user, tx);
         return [
-          `MINTING contract ${tx.to}`,
+          `MINTING ${title}`,
+          ...(link ? [link] : []),
+          `chain: ${chainNameFor(tx.chainId)}`,
           `minted by fleet wallet: ${result.mintWallet}`,
           `mint TX: ${result.mintTx}`,
           `tokenId: ${result.tokenId?.toString() ?? "?"}`,
@@ -262,7 +275,9 @@ export class TelegramCommandBot {
       const { txHash } = await this.deps.executor.execute(tx);
       const receipt = await this.deps.executor.verify(txHash, tx);
       return [
-        `MINTING contract ${tx.to}`,
+        `MINTING ${title}`,
+        ...(link ? [link] : []),
+        `chain: ${chainNameFor(tx.chainId)}`,
         `TX: ${txHash}`,
         `status: ${receipt.success ? "success" : "failed"} · owner confirmed: ${receipt.ownerConfirmed}`,
         `gas used: ${receipt.gasUsed?.toString() ?? "?"}`,
@@ -280,13 +295,15 @@ export class TelegramCommandBot {
     const pass = prepared.filter((tx) => tx.policy === "PASS");
     if (index >= pass.length) return `Index ${index} out of range (${pass.length} prepared).`;
     const tx = pass[index];
+    const { title, link } = describeMint(tx);
     const user = await this.deps.users.addressFor(chatId);
     if (!user) return "You haven't registered a receive address. Run /register <0x...address> first.";
     try {
       const signable = await this.deps.nonCustodial.buildMintTransaction(user, tx);
       return [
-        `SIGN THIS IN YOUR WALLET — free mint ${tx.to}`,
-        `chain: ${signable.chainId} · from (you): ${user}`,
+        `SIGN THIS IN YOUR WALLET — ${title}`,
+        ...(link ? [link] : []),
+        `chain: ${chainNameFor(signable.chainId)} · from (you): ${user}`,
         `to: ${signable.to}`,
         `value: ${signable.value.toString()} wei · gas: ${signable.gas.toString()} · gasPrice: ${signable.gasPriceWei} wei`,
         `est cost: ${signable.estimatedCostNative} wei`,
@@ -308,12 +325,14 @@ export class TelegramCommandBot {
     const pass = prepared.filter((tx) => tx.policy === "PASS");
     if (!pass.length) return "No prepared mints. Run /scan first.";
     const tx = pass[pass.length - 1];
+    const { title, link } = describeMint(tx);
     const user = await this.deps.users.addressFor(chatId);
     if (!user) return "You haven't registered a receive address. Run /register <0x...address> first.";
     try {
       const result = await this.deps.nonCustodial.submitSignedTransaction(user, tx, signed as `0x${string}`);
       return [
-        "SUBMITTED (non-custodial)",
+        `SUBMITTED (non-custodial) — ${title}`,
+        ...(link ? [link] : []),
         `TX: ${result.txHash}`,
         `status: ${result.success ? "success" : "failed"}`,
         `NFT in your wallet: before ${result.ownedBefore?.toString() ?? "?"} → after ${result.ownedAfter?.toString() ?? "?"}`,
@@ -334,7 +353,7 @@ export class TelegramCommandBot {
       const results = await this.deps.executor.executeBatch(pass);
       return [
         "BATCH MINT via EIP-7702",
-        ...results.map((result) => `  chain ${result.chainId}: ${result.count} mint(s) · TX ${result.txHash}`),
+        ...results.map((result) => `  ${chainNameFor(result.chainId)}: ${result.count} mint(s) · TX ${result.txHash}`),
       ].join("\n");
     } catch (error) {
       return `BATCH MINT ABORTED: ${(error as Error).message}`;

@@ -1,4 +1,4 @@
-import { createPublicClient, http, type PublicClient } from "viem";
+import { createPublicClient, http, type Address, type PublicClient } from "viem";
 import type { PreparedTransactionStore } from "../domain/ports";
 import type { MintCandidate, Opportunity, PreparedTransaction, SimulationResult, TransactionRequest } from "../domain/types";
 
@@ -8,7 +8,12 @@ export class RpcTransactionPreparer {
     const client = this.clients[candidate.chainKey];
     if (!client || !simulation.gasEstimate || !simulation.gasPriceWei) throw new Error(`cannot prepare ${candidate.id}: missing RPC or gas result`);
     const chainId = await client.getChainId();
-    const prepared: PreparedTransaction = { ...request, chainId, gas: simulation.gasEstimate, gasPriceWei: simulation.gasPriceWei, simulationMode: String(simulation.metadata?.simulationMode ?? "unknown"), policy: decision.allowed ? "PASS" : opportunity.expectedValueNative <= 0 ? "SKIP" : "REJECT", reasons: decision.reasons, preparedAt: new Date().toISOString(), candidateId: candidate.id, mintFunction: candidate.mintFunction, abi: candidate.abi }; 
+    // request.to is the contract actually called — for a SeaDrop mint that's OpenSea's
+    // shared SeaDrop router, not the collection itself, so metadata.nftContract (when
+    // present) is what a viewer actually wants to see and click through to.
+    const nftContract = typeof candidate.metadata.nftContract === "string" ? candidate.metadata.nftContract as Address : undefined;
+    const name = typeof candidate.metadata.name === "string" ? candidate.metadata.name : undefined;
+    const prepared: PreparedTransaction = { ...request, chainId, gas: simulation.gasEstimate, gasPriceWei: simulation.gasPriceWei, simulationMode: String(simulation.metadata?.simulationMode ?? "unknown"), policy: decision.allowed ? "PASS" : opportunity.expectedValueNative <= 0 ? "SKIP" : "REJECT", reasons: decision.reasons, preparedAt: new Date().toISOString(), candidateId: candidate.id, mintFunction: candidate.mintFunction, abi: candidate.abi, ...(nftContract ? { nftContract } : {}), ...(name ? { name } : {}) };
     await this.store.save(prepared);
     return prepared;
   }

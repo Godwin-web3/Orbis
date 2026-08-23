@@ -28,7 +28,7 @@ export type StateDiff = { address: Address; field: string; before: string; after
 export type SimulationResult = { success: boolean; gasEstimate?: bigint; gasPriceWei?: bigint; stateDiffAvailable: boolean; stateDiff?: StateDiff[]; assetDiff: AssetDiff[]; approvalDiff: ApprovalDiff[]; unexpectedCalls?: ExternalCall[]; externalValueTransfers?: { asset: "native" | "erc20" | "unknown"; amount: string; direction: "out" | "in" }[]; revertReason?: string; metadata?: Record<string, Scalar> };
 export type Opportunity = { candidate: MintCandidate; classification: Classification; probability: number; estimatedValueNative: number; gasNative: number; executionRisk: number; expectedValueNative: number; priority: number };
 export type TransactionRequest = { chainKey: string; to: Address; data: `0x${string}`; value: bigint; from?: Address; gas?: bigint };
-export type PreparedTransaction = TransactionRequest & { chainId: number; gas: bigint; gasPriceWei: bigint; simulationMode: string; policy: "PASS" | "REJECT" | "SKIP"; reasons: string[]; preparedAt: string; candidateId?: string; mintFunction?: string; abi?: unknown[] };
+export type PreparedTransaction = TransactionRequest & { chainId: number; gas: bigint; gasPriceWei: bigint; simulationMode: string; policy: "PASS" | "REJECT" | "SKIP"; reasons: string[]; preparedAt: string; candidateId?: string; mintFunction?: string; abi?: unknown[]; nftContract?: Address; name?: string };
 
 /**
  * The full status of a drop a discovery source has ever checked, independent of whether it

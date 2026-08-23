@@ -1,5 +1,7 @@
 import { createPublicClient, http, type Address } from "viem";
 import { detectMintFunction, identifyCandidate } from "./contract/detector";
+import { readErc721Name } from "./rpc/erc721-name";
+import { dropLink } from "../chains/registry";
 import type { MintEngine } from "../app/engine";
 
 const HEX_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
@@ -73,9 +75,14 @@ export async function processTarget(engine: MintEngine, rpcUrls: string[], targe
   const bytecode = await client.getBytecode({ address: target.contract });
   if (!bytecode) return `No contract found at ${target.contract} on ${target.chainKey}.`;
 
+  const name = await readErc721Name(client, target.contract);
+  const link = dropLink(target.chainKey, target.contract);
+  const title = name ? `${name} (${target.contract})` : target.contract;
+  const header = [title, ...(link ? [link] : []), `chain: ${target.chainKey}`];
+
   const mintFunctions = detectMintFunction(bytecode);
   if (!mintFunctions.length) {
-    return `Found a contract at ${target.contract} on ${target.chainKey}, but couldn't detect a recognizable mint function (mint/publicMint/freeMint/claim). It may use a non-standard function name — this bot can't guess those yet.`;
+    return [...header, "", "Couldn't detect a recognizable mint function (mint/publicMint/freeMint/claim). It may use a non-standard function name — this bot can't guess those yet."].join("\n");
   }
 
   const lines: string[] = [];
@@ -84,5 +91,5 @@ export async function processTarget(engine: MintEngine, rpcUrls: string[], targe
     const result = await engine.processOne(candidate);
     lines.push(`${mintFunction}: ${result.decision === "PASS" ? "PASS — check /prepared" : `${result.decision} (${result.reasons.join("; ") || "no reason given"})`}`);
   }
-  return [`Checked ${target.contract} on ${target.chainKey}:`, ...lines].join("\n");
+  return [...header, "", ...lines].join("\n");
 }
