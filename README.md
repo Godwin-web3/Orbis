@@ -29,7 +29,7 @@ The system is architecturally complete while integrations are enabled progressiv
 cp .env.example .env
 bun run dry-run
 CANDIDATE_FILE=fixtures/nasty-cases.jsonl bun run dry-run
-ENGINE_MODE=live-readonly ENABLED_CHAINS=base BASE_RPC_URL=https://your-rpc.example bun run dev
+ENGINE_MODE=live-readonly ENABLED_CHAINS=ethereum ETHEREUM_RPC_URL=https://your-rpc.example bun run dev
 bun test
 bun run typecheck
 TESTNET_CHAIN_KEY=base TESTNET_RPC_URL=https://your-testnet-rpc TESTNET_CONTRACT=0x... TESTNET_FROM=0x... TESTNET_MINT_FUNCTION=mint bun run testnet-probe
@@ -111,7 +111,7 @@ Registration, `/mint`, `/sign`, `/submit`, and the `/auto*` commands are open to
 TELEGRAM_BOT_TOKEN=<bot-token>
 TELEGRAM_ADMIN_IDS=<your-telegram-id>        # comma-separated; falls back to TELEGRAM_CHAT_ID
 EXECUTION_PRIVATE_KEY=<hex-key>              # optional until you mint
-ENABLED_CHAINS=base,arbitrum                # see config/chains.ts; set the matching *_RPC_URL
+ENABLED_CHAINS=ethereum,robinhood            # see config/chains.ts; set the matching *_RPC_URL
 bun run telegram-bot
 ```
 
@@ -248,7 +248,7 @@ The system runs as two separate Telegram bots that share the same engine. The sp
 # create a bot via @BotFather; add it as an admin to a public channel
 TELEGRAM_ALERT_BOT_TOKEN=<bot-token>      # falls back to TELEGRAM_BOT_TOKEN
 TELEGRAM_ALERT_CHANNEL_ID=<channel-id>    # falls back to TELEGRAM_CHAT_ID
-ENABLED_CHAINS=base,arbitrum              # see config/chains.ts; set the matching *_RPC_URL
+ENABLED_CHAINS=ethereum,robinhood         # see config/chains.ts; set the matching *_RPC_URL
 SCAN_INTERVAL_MS=120000                   # optional
 bun run discovery-bot
 ```
