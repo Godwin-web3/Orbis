@@ -90,6 +90,8 @@ export class TelegramCommandBot {
       target?: (input: string) => Promise<string>;
       /** Every drop a discovery source has ever checked — live free, live paid, upcoming, ended — not just the ones that became a ready-to-mint candidate. Powers /upcoming. */
       dropStatus?: DropStatusStore;
+      /** Checks a manually-supplied contract's current SeaDrop status, for /snipe to arm ahead of its open time — see discovery/target.ts's checkSeaDropTarget. */
+      snipeTarget?: (input: string) => Promise<DropStatus | { error: string }>;
       chainsEnabled: string[];
     },
   ) {}
@@ -115,7 +117,7 @@ export class TelegramCommandBot {
   async sendTo(chatId: string, text: string): Promise<void> { return this.send(chatId, text); }
 
   /** Link previews only matter for the handful of commands whose output includes an OpenSea/explorer link — enabling it elsewhere would just render an unrelated preview for the operator's own bot-token-looking text or similar noise. */
-  private static readonly COMMANDS_WITH_LINK_PREVIEW = new Set(["upcoming", "target", "scan", "prepared", "mint", "sign", "submit"]);
+  private static readonly COMMANDS_WITH_LINK_PREVIEW = new Set(["upcoming", "target", "snipe", "scan", "prepared", "mint", "sign", "submit"]);
 
   async handleCommand(chatId: string, parsed: ParsedCommand, meta: { messageId?: number; chatType?: string } = {}): Promise<string> {
     switch (parsed.command) {
@@ -124,6 +126,7 @@ export class TelegramCommandBot {
       case "register": return this.register(chatId, parsed.args);
       case "scan": return this.scan();
       case "target": return this.target(parsed.args);
+      case "snipe": return this.snipe(parsed.args);
       case "upcoming": return this.upcoming();
       case "prepared": return this.prepared();
       case "mint": return this.mint(chatId, parsed.args);
@@ -146,6 +149,7 @@ export class TelegramCommandBot {
       "/status — wallet, chains, guard, registered users, prepared count",
       "/scan — run a discovery+simulation+prepare pass",
       "/target <address-or-url> — check one specific contract (raw 0x address, OpenSea/Zora/explorer URL) and run it through the same safety pipeline as auto-discovery",
+      "/snipe <address-or-url> — arm a SeaDrop drop ahead of its open time: everyone with /auto on gets signed and ready to fire the instant it opens, instead of waiting for the next scan",
       "/upcoming — every known drop's status: live & free, live but paid, upcoming (with countdown), not just ready-to-mint ones",
       "/prepared — list mints ready to broadcast",
       "/mint <index> — mint to YOUR registered address (re-verifies free/open/limit)",
@@ -209,6 +213,27 @@ export class TelegramCommandBot {
     } catch (error) {
       return `TARGET CHECK FAILED: ${(error as Error).message}`;
     }
+  }
+
+  private async snipe(args: string[]): Promise<string> {
+    if (!this.deps.snipeTarget || !this.deps.dropStatus) return "Sniping isn't wired up on this bot.";
+    const input = args.join(" ").trim();
+    if (!input) return "Usage: /snipe <0x-address, OpenSea asset URL, Zora URL, or explorer address URL>";
+    let result: DropStatus | { error: string };
+    try {
+      result = await this.deps.snipeTarget(input);
+    } catch (error) {
+      return `SNIPE CHECK FAILED: ${(error as Error).message}`;
+    }
+    if ("error" in result) return result.error;
+    await this.deps.dropStatus.save(result);
+
+    const now = Math.floor(Date.now() / 1000);
+    const line = formatDropStatus(result, now);
+    if (result.status === "upcoming") return `Armed for sniping:\n${line}\n\nEveryone with /auto on will be signed and ready to fire the instant it opens.`;
+    if (result.status === "live_free") return `Already live and free — no need to snipe, the next /scan or auto-mint pass will catch it:\n${line}`;
+    if (result.status === "live_paid") return `Live but not free — nothing to snipe:\n${line}`;
+    return `Already ended — nothing to snipe:\n${line}`;
   }
 
   private async upcoming(): Promise<string> {

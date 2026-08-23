@@ -272,3 +272,67 @@ describe("/upcoming command", () => {
     expect(reply).toContain("robinhood");
   });
 });
+
+describe("/snipe command", () => {
+  function makeBotWithSnipeTarget(snipeTarget: ((input: string) => Promise<DropStatus | { error: string }>) | undefined) {
+    const prepared: PreparedTransactionStore = { save: async () => {}, list: async () => [] };
+    const users: UserRegistry = { register: async (userId, address) => ({ userId, address, registeredAt: "now" }), addressFor: async () => undefined, list: async () => [] };
+    const saved: DropStatus[] = [];
+    const dropStatus: DropStatusStore = { save: async (status) => { saved.push(status); }, list: async () => saved };
+    const bot = new TelegramCommandBot("fake-token", ["admin-1"], { prepared, users, guard: { get: () => false, set: async () => {} }, scan: async () => 0, chainsEnabled: [], dropStatus, snipeTarget });
+    return { bot, saved };
+  }
+
+  test("reports when sniping isn't wired up", async () => {
+    const { bot } = makeBotWithSnipeTarget(undefined);
+    expect(await bot.handleCommand("x", { command: "snipe", args: ["0x1"] })).toContain("isn't wired up");
+  });
+
+  test("prompts for usage with no argument", async () => {
+    const { bot } = makeBotWithSnipeTarget(async () => ({ error: "unreachable" }));
+    expect(await bot.handleCommand("x", { command: "snipe", args: [] })).toContain("Usage: /snipe");
+  });
+
+  test("relays a resolution error without saving anything", async () => {
+    const { bot, saved } = makeBotWithSnipeTarget(async () => ({ error: "not a SeaDrop-registered drop" }));
+    const reply = await bot.handleCommand("x", { command: "snipe", args: ["0xabc"] });
+    expect(reply).toBe("not a SeaDrop-registered drop");
+    expect(saved).toHaveLength(0);
+  });
+
+  test("arms an upcoming drop and saves its status", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const target: DropStatus = { id: "ethereum:0xabc", chainKey: "ethereum", nftContract: "0x0000000000000000000000000000000000000abc", source: "snipe", status: "upcoming", name: "Cool Cats", mintPriceWei: "0", startTime: now + 3600, endTime: 0, maxTotalMintableByWallet: 1, checkedAt: "now" };
+    const { bot, saved } = makeBotWithSnipeTarget(async () => target);
+    const reply = await bot.handleCommand("x", { command: "snipe", args: ["0xabc"] });
+    expect(reply).toContain("Armed for sniping");
+    expect(reply).toContain("Cool Cats");
+    expect(reply).toContain("ready to fire the instant it opens");
+    expect(saved).toEqual([target]);
+  });
+
+  test("tells the user there's nothing to snipe when the drop is already live and free", async () => {
+    const target: DropStatus = { id: "ethereum:0xabc", chainKey: "ethereum", nftContract: "0x0000000000000000000000000000000000000abc", source: "snipe", status: "live_free", mintPriceWei: "0", startTime: 0, endTime: 0, maxTotalMintableByWallet: 1, checkedAt: "now" };
+    const { bot } = makeBotWithSnipeTarget(async () => target);
+    const reply = await bot.handleCommand("x", { command: "snipe", args: ["0xabc"] });
+    expect(reply).toContain("Already live and free");
+  });
+
+  test("tells the user there's nothing to snipe for a paid or ended drop", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const paid: DropStatus = { id: "ethereum:0xabc", chainKey: "ethereum", nftContract: "0x0000000000000000000000000000000000000abc", source: "snipe", status: "live_paid", mintPriceWei: "1000000000000000", startTime: 0, endTime: 0, maxTotalMintableByWallet: 1, checkedAt: "now" };
+    const { bot: paidBot } = makeBotWithSnipeTarget(async () => paid);
+    expect(await paidBot.handleCommand("x", { command: "snipe", args: ["0xabc"] })).toContain("Live but not free");
+
+    const ended: DropStatus = { ...paid, status: "ended", mintPriceWei: "0", endTime: now - 100 };
+    const { bot: endedBot } = makeBotWithSnipeTarget(async () => ended);
+    expect(await endedBot.handleCommand("x", { command: "snipe", args: ["0xabc"] })).toContain("Already ended");
+  });
+
+  test("surfaces an exception from snipeTarget as a clear failure message", async () => {
+    const { bot } = makeBotWithSnipeTarget(async () => { throw new Error("RPC timed out"); });
+    const reply = await bot.handleCommand("x", { command: "snipe", args: ["0xabc"] });
+    expect(reply).toContain("SNIPE CHECK FAILED");
+    expect(reply).toContain("RPC timed out");
+  });
+});

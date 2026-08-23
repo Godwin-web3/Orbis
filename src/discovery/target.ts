@@ -1,8 +1,10 @@
 import { createPublicClient, http, type Address } from "viem";
 import { detectMintFunction, identifyCandidate } from "./contract/detector";
 import { readErc721Name } from "./rpc/erc721-name";
+import { readPublicDrop } from "./rpc/seadrop-source";
 import { dropLink } from "../chains/registry";
 import type { MintEngine } from "../app/engine";
+import type { DropStatus } from "../domain/types";
 
 const HEX_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 
@@ -92,4 +94,36 @@ export async function processTarget(engine: MintEngine, rpcUrls: string[], targe
     lines.push(`${mintFunction}: ${result.decision === "PASS" ? "PASS — check /prepared" : `${result.decision} (${result.reasons.join("; ") || "no reason given"})`}`);
   }
   return [...header, "", ...lines].join("\n");
+}
+
+/**
+ * Checks whether a manually-supplied contract is a real SeaDrop drop and returns its
+ * current DropStatus — same shape /upcoming already renders, so /snipe (see bot.ts) can
+ * reuse formatDropStatus() rather than building its own message format. Only supports
+ * SeaDrop's public phase, same boundary as the rest of this codebase's SeaDrop support
+ * (see seadrop-source.ts's doc comment) — this is what SnipeScheduler (execution/snipe.ts)
+ * later arms and fires once the drop's startTime arrives.
+ */
+export async function checkSeaDropTarget(rpcUrls: string[], target: ResolvedTarget): Promise<DropStatus | { error: string }> {
+  if (!rpcUrls.length) return { error: `No RPC configured for chain "${target.chainKey}". Set its *_RPC_URL and enable it in ENABLED_CHAINS first.` };
+  const client = createPublicClient({ transport: http(rpcUrls[0]) });
+  const drop = await readPublicDrop(client, target.contract);
+  if (!drop) return { error: `${target.contract} on ${target.chainKey} isn't a SeaDrop-registered drop (or the read failed) — /snipe only works for SeaDrop's public phase.` };
+
+  const now = Math.floor(Date.now() / 1000);
+  const status: DropStatus["status"] = now < drop.startTime ? "upcoming" : drop.endTime !== 0 && now > drop.endTime ? "ended" : drop.mintPrice !== 0n ? "live_paid" : "live_free";
+  const name = await readErc721Name(client, target.contract);
+  return {
+    id: `${target.chainKey}:${target.contract}`,
+    chainKey: target.chainKey,
+    nftContract: target.contract,
+    source: "snipe",
+    status,
+    ...(name ? { name } : {}),
+    mintPriceWei: drop.mintPrice.toString(),
+    startTime: drop.startTime,
+    endTime: drop.endTime,
+    maxTotalMintableByWallet: drop.maxTotalMintableByWallet,
+    checkedAt: new Date().toISOString(),
+  };
 }

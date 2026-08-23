@@ -31,7 +31,7 @@ function capRange(from: bigint, safeLatest: bigint, max: bigint): bigint {
   return capped < safeLatest ? capped : safeLatest;
 }
 
-const SEADROP_ABI = [
+export const SEADROP_ABI = [
   {
     type: "function", name: "getPublicDrop", stateMutability: "view",
     inputs: [{ name: "nftContract", type: "address" }],
@@ -49,6 +49,31 @@ const SEADROP_ABI = [
   { type: "function", name: "getAllowedFeeRecipients", stateMutability: "view", inputs: [{ name: "nftContract", type: "address" }], outputs: [{ type: "address[]" }] },
   { type: "function", name: "mintPublic", stateMutability: "payable", inputs: [{ name: "nftContract", type: "address" }, { name: "feeRecipient", type: "address" }, { name: "minterIfNotPayer", type: "address" }, { name: "quantity", type: "uint256" }], outputs: [] },
 ] as const satisfies Abi;
+
+export type PublicDrop = { mintPrice: bigint; startTime: number; endTime: number; maxTotalMintableByWallet: number; feeBps: number; restrictFeeRecipients: boolean };
+
+/** Reads a contract's current SeaDrop public-drop config. Returns undefined for an unset mapping entry (all-zero tuple) — not a real SeaDrop-registered drop — or on any read failure (not SeaDrop-registered at all, or a transient RPC error). Shared by discovery (candidateFor) and /snipe's on-demand check so both use the exact same read + "is this real" test. */
+export async function readPublicDrop(client: PublicClient, nftContract: Address): Promise<PublicDrop | undefined> {
+  try {
+    const drop = await client.readContract({ address: SEADROP_ADDRESS, abi: SEADROP_ABI, functionName: "getPublicDrop", args: [nftContract] });
+    if (drop.startTime === 0 && drop.endTime === 0 && drop.maxTotalMintableByWallet === 0) return undefined;
+    return drop;
+  } catch {
+    return undefined;
+  }
+}
+
+/** SeaDrop reverts on a zero fee recipient, and on a disallowed one when the drop restricts them — so the real recipient always has to come from the chain, never assumed. Returns undefined only when the drop restricts recipients and none are currently allowed (no valid call can be built at all). */
+export async function resolveFeeRecipient(client: PublicClient, nftContract: Address, restrictFeeRecipients: boolean): Promise<Address | undefined> {
+  if (!restrictFeeRecipients) return OPENSEA_FEE_RECIPIENT;
+  const allowed = await client.readContract({ address: SEADROP_ADDRESS, abi: SEADROP_ABI, functionName: "getAllowedFeeRecipients", args: [nftContract] });
+  return allowed[0]; // undefined when empty
+}
+
+/** minterIfNotPayer = address(0) means "credit whoever calls this" — same calldata works for every wallet. */
+export function encodeMintPublic(nftContract: Address, feeRecipient: Address, quantity: bigint): `0x${string}` {
+  return encodeFunctionData({ abi: SEADROP_ABI, functionName: "mintPublic", args: [nftContract, feeRecipient, ZERO_ADDRESS, quantity] });
+}
 
 const MAX_BLOCK_RANGE = 50n;
 const RETRY_BLOCK_RANGE = 10n;
@@ -188,11 +213,11 @@ export class SeaDropDiscoverySource implements DiscoverySource {
 
   private async candidateFor(client: PublicClient, nftContract: Address): Promise<MintCandidate | undefined> {
     try {
-      const drop = await client.readContract({ address: SEADROP_ADDRESS, abi: SEADROP_ABI, functionName: "getPublicDrop", args: [nftContract] });
+      const drop = await readPublicDrop(client, nftContract);
+      if (!drop) return undefined; // unset mapping entry — not a real SeaDrop-registered drop
       // abitype decodes Solidity ints <=48 bits (startTime/endTime/maxTotalMintableByWallet
       // here, all uint48 or smaller) as `number`, and anything wider (mintPrice, uint80) as `bigint`.
       const { mintPrice, startTime, endTime, maxTotalMintableByWallet, restrictFeeRecipients } = drop;
-      if (startTime === 0 && endTime === 0 && maxTotalMintableByWallet === 0) return undefined; // unset mapping entry — not a real SeaDrop-registered drop
 
       const now = Math.floor(Date.now() / 1000);
       const status: DropStatus["status"] = now < startTime ? "upcoming" : endTime !== 0 && now > endTime ? "ended" : mintPrice !== 0n ? "live_paid" : "live_free";
@@ -201,15 +226,11 @@ export class SeaDropDiscoverySource implements DiscoverySource {
       await this.saveStatus(nftContract, status, name, mintPrice, startTime, endTime, maxTotalMintableByWallet);
       if (status !== "live_free") return undefined;
 
-      let feeRecipient: Address = OPENSEA_FEE_RECIPIENT;
-      if (restrictFeeRecipients) {
-        const allowed = await client.readContract({ address: SEADROP_ADDRESS, abi: SEADROP_ABI, functionName: "getAllowedFeeRecipients", args: [nftContract] });
-        if (!allowed.length) return undefined; // restricted and nothing allowed — no valid call can be built
-        feeRecipient = allowed[0];
-      }
+      const feeRecipient = await resolveFeeRecipient(client, nftContract, restrictFeeRecipients);
+      if (!feeRecipient) return undefined; // restricted and nothing allowed — no valid call can be built
 
       const quantity = BigInt(this.config.quantity ?? 1);
-      const calldata = encodeFunctionData({ abi: SEADROP_ABI, functionName: "mintPublic", args: [nftContract, feeRecipient, ZERO_ADDRESS, quantity] });
+      const calldata = encodeMintPublic(nftContract, feeRecipient, quantity);
 
       return {
         id: `${this.config.chainKey}:seadrop:${nftContract}`,

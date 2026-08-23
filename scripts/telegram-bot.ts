@@ -6,12 +6,13 @@ import { RpcExecutor } from "../src/execution/executor";
 import { WalletFleet, MintRelay } from "../src/execution/relay";
 import { NonCustodialRelay } from "../src/execution/noncustodial";
 import { AutoMintLoop, JsonlAutoMintLog } from "../src/execution/automint";
+import { SnipeScheduler } from "../src/execution/snipe";
 import { JsonlUserRegistry } from "../src/users/registry";
 import { JsonlUserKeyStore, parseEncryptionKey } from "../src/users/keystore";
 import { TelegramCommandBot } from "../src/telegram/bot";
-import { parseTargetInput, processTarget } from "../src/discovery/target";
+import { parseTargetInput, processTarget, checkSeaDropTarget } from "../src/discovery/target";
 import { JsonlDropStatusStore } from "../src/discovery/rpc/drop-status";
-import { enabledChains } from "../config/chains";
+import { chains, enabledChains } from "../config/chains";
 
 const GUARD_PATH = process.env.GUARD_STATE_PATH ?? "data/guard.json";
 
@@ -74,15 +75,24 @@ async function main() {
       const engine = buildRuntime({ dropStatusStore, chainKeys: [resolved.chainKey] });
       return processTarget(engine, urlsFor(resolved.chainKey), resolved);
     },
+    snipeTarget: async (input: string) => {
+      const defaultChainKey = chainsEnabled[0];
+      const resolved = parseTargetInput(input, defaultChainKey);
+      if (!resolved) return { error: "Couldn't figure out the chain/contract from that. Paste the raw 0x contract address, or use an OpenSea asset, Zora, or block-explorer URL." };
+      if (!chainsEnabled.includes(resolved.chainKey)) return { error: `Chain "${resolved.chainKey}" isn't enabled. Enabled: ${chainsEnabled.join(", ") || "none"}.` };
+      return checkSeaDropTarget(urlsFor(resolved.chainKey), resolved);
+    },
   });
 
   let autoMintLoop: AutoMintLoop | undefined;
+  let snipeScheduler: SnipeScheduler | undefined;
   if (keystore) {
+    const autoMintLog = new JsonlAutoMintLog(process.env.AUTO_MINT_LOG_PATH ?? "data/automint-log.jsonl");
     autoMintLoop = new AutoMintLoop({
       prepared,
       keystore,
       guard,
-      log: new JsonlAutoMintLog(process.env.AUTO_MINT_LOG_PATH ?? "data/automint-log.jsonl"),
+      log: autoMintLog,
       caps: {
         maxPerUserPerScan: Number(process.env.AUTO_MINT_MAX_PER_USER_PER_SCAN ?? "1"),
         maxTotalPerScan: Number(process.env.AUTO_MINT_MAX_TOTAL_PER_SCAN ?? "10"),
@@ -91,10 +101,23 @@ async function main() {
       onError: (error) => console.error("Auto-mint loop error:", (error as Error).message),
     });
     autoMintLoop.start(Number(process.env.AUTO_MINT_SCAN_INTERVAL_MS ?? "120000"));
+
+    snipeScheduler = new SnipeScheduler({
+      dropStatusStore,
+      keystore,
+      guard,
+      log: autoMintLog,
+      notify: (userId, text) => bot.sendTo(userId, text),
+      rpcUrlsFor: urlsFor,
+      chainIdFor: (chainKey) => chains[chainKey]?.chainId,
+      armLeadSeconds: Number(process.env.SNIPE_ARM_LEAD_SECONDS ?? "15"),
+      onError: (error, context) => console.error(`Snipe scheduler error (${context}):`, (error as Error).message),
+    });
+    snipeScheduler.start(Number(process.env.SNIPE_TICK_INTERVAL_MS ?? "10000"));
   }
 
   console.log(
-    `Telegram bot started. Authorized chats: ${allowed.join(", ")}. Relay fleet: ${relay?.fleet.size ?? 0} wallet(s). Executor: ${executor?.address ?? "(none)"}. Auto-mint: ${autoMintLoop ? "enabled (users opt in with /autokey + /auto on)" : "disabled (set AUTO_MINT_ENCRYPTION_KEY to enable)"}`,
+    `Telegram bot started. Authorized chats: ${allowed.join(", ")}. Relay fleet: ${relay?.fleet.size ?? 0} wallet(s). Executor: ${executor?.address ?? "(none)"}. Auto-mint: ${autoMintLoop ? "enabled (users opt in with /autokey + /auto on)" : "disabled (set AUTO_MINT_ENCRYPTION_KEY to enable)"}. Snipe scheduler: ${snipeScheduler ? "enabled (/snipe to arm a drop ahead of time)" : "disabled (needs AUTO_MINT_ENCRYPTION_KEY)"}`,
   );
   await bot.run();
 }

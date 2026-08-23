@@ -124,6 +124,7 @@ Commands:
 | `/register <address>` | Set the receive address for this chat — free mints via `/mint` land here; no private key needed |
 | `/scan` **[admin]** | Run a discovery + simulation + prepare pass over enabled chains |
 | `/target <address-or-url>` | Check one specific contract you already know about — raw `0x` address, OpenSea asset URL, Zora URL, or a block explorer's address URL — through the same classify/simulate/policy pipeline as auto-discovery |
+| `/snipe <address-or-url>` | Arm a SeaDrop drop ahead of its open time — see [Sniping](#sniping-arming-a-drop-ahead-of-time) |
 | `/upcoming` | Every known drop's status — live & free, live but paid, upcoming (with a countdown), or ended — not just the ones that already qualify as a ready-to-mint candidate |
 | `/prepared` | List mints approved by policy that are ready to broadcast |
 | `/mint <index>` | Mint to YOUR registered address: a fleet wallet mints (pays gas), then transfers the NFT to you |
@@ -206,6 +207,30 @@ AUTO_MINT_SCAN_INTERVAL_MS=120000
 AUTO_MINT_MAX_PER_USER_PER_SCAN=1
 AUTO_MINT_MAX_TOTAL_PER_SCAN=10
 bun run telegram-bot
+```
+
+## Sniping (arming a drop ahead of time)
+
+The scan loop above is reactive: it only notices a drop within the next `AUTO_MINT_SCAN_INTERVAL_MS` pass, whenever that happens to land relative to the drop's actual open time. For a drop whose start time is already known (SeaDrop's `getPublicDrop()` returns it directly), that gap is unnecessary — `SnipeScheduler` (`src/execution/snipe.ts`) closes it by preparing everything *before* the drop opens and firing at the exact moment, the same technique public-mint sniping tools use: sign every opted-in user's transaction ahead of time, then broadcast the already-signed bytes to several RPC endpoints simultaneously the instant the stage starts, instead of doing any of that work after noticing it's live.
+
+```text
+/snipe <address-or-url>        →  checks it's a real SeaDrop drop and records its status
+   "upcoming"                  →  armed — every /auto on user gets pre-signed and held, ready
+   already live/paid/ended     →  nothing to snipe; told so directly
+```
+
+A target reaches the scheduler two ways, and both look identical to it once recorded — a normal discovery scan finding an `"upcoming"` `DropStatus` on its own, or a manual `/snipe` recording one immediately. Mechanics:
+
+1. Every ~`SNIPE_TICK_INTERVAL_MS` (default 10s), the scheduler checks every known `"upcoming"` drop; one whose start time falls within `SNIPE_ARM_LEAD_SECONDS` (default 15s) gets armed.
+2. Arming re-verifies the drop is still free and open, resolves the fee recipient, and — for every user with `/auto on` who hasn't already been attempted against this exact drop — fetches a fresh nonce and gas price and **signs the mint transaction locally**, entirely offline.
+3. It waits until the drop's exact start time, then broadcasts every signed transaction to every configured RPC URL for that chain at once (comma-separated `*_RPC_URL` values — already how multi-provider config works elsewhere in this project).
+4. Same one-attempt-ever bookkeeping as autonomous auto-mint (`AutoMintLog` — a snipe and a regular auto-mint pass share the same log, so a drop isn't attempted twice for the same user).
+5. Only ever targets SeaDrop's **public** phase (`mintPublic` — no signature or allowlist proof involved), the same boundary the rest of this project's SeaDrop support has; see [SeaDrop discovery](#seadrop-discovery) for why allowlist/FCFS phases are out of scope.
+6. Requires `AUTO_MINT_ENCRYPTION_KEY` (same as autonomous auto-mint, since it signs from the same per-user keys) and the operator's `/ack on` guard.
+
+```sh
+SNIPE_ARM_LEAD_SECONDS=15
+SNIPE_TICK_INTERVAL_MS=10000
 ```
 
 ## Persistent deployment (Render)
