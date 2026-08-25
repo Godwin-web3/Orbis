@@ -5,6 +5,7 @@ export interface CalldataBuilder { build(candidate: MintCandidate): Promise<Tran
 export interface Classifier { classify(candidate: MintCandidate, simulation?: SimulationResult): Promise<Classification>; }
 export interface Simulator { simulate(candidate: MintCandidate, request?: TransactionRequest): Promise<SimulationResult>; }
 export interface OpportunityEngine { score(candidate: MintCandidate, classification: Classification, simulation: SimulationResult): Promise<Opportunity>; }
+export interface ValueOracle { enrich(candidate: MintCandidate): Promise<MintCandidate>; }
 export interface PolicyEngine { evaluate(opportunity: Opportunity, simulation: SimulationResult): Promise<{ allowed: boolean; reasons: string[] }>; }
 export interface PreparedTransactionStore { save(transaction: PreparedTransaction): Promise<void>; list(): Promise<PreparedTransaction[]>; }
 export interface Signer { sign(request: TransactionRequest): Promise<`0x${string}`>; }
