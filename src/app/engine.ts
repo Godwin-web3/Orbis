@@ -1,4 +1,4 @@
-import type { CalldataBuilder, CandidateStore, Classifier, ContractInspector, DiscoverySource, NotificationSink, OpportunityEngine, PolicyEngine, PreparedTransactionStore, Simulator } from "../domain/ports";
+import type { CalldataBuilder, CandidateStore, Classifier, ContractInspector, DiscoverySource, NotificationSink, OpportunityEngine, PolicyEngine, PreparedTransactionStore, Simulator, ValueOracle } from "../domain/ports";
 import { TimeToActionMetrics } from "../core/metrics";
 import { buildCandidateReport } from "../core/report";
 import type { MintCandidate, PreparedTransaction, TransactionRequest } from "../domain/types";
@@ -6,7 +6,7 @@ import type { RpcTransactionPreparer } from "../execution/rpc-preparer";
 
 export class MintEngine {
   readonly metrics: TimeToActionMetrics;
-  constructor(private readonly deps: { sources: DiscoverySource[]; classifier: Classifier; opportunities: OpportunityEngine; simulator: Simulator; policy: PolicyEngine; store: CandidateStore; notifications: NotificationSink; calldata?: CalldataBuilder; inspector?: ContractInspector; preparer?: RpcTransactionPreparer }, metrics = new TimeToActionMetrics()) { this.metrics = metrics; }
+  constructor(private readonly deps: { sources: DiscoverySource[]; classifier: Classifier; opportunities: OpportunityEngine; simulator: Simulator; policy: PolicyEngine; store: CandidateStore; notifications: NotificationSink; calldata?: CalldataBuilder; inspector?: ContractInspector; preparer?: RpcTransactionPreparer; valueOracle?: ValueOracle }, metrics = new TimeToActionMetrics()) { this.metrics = metrics; }
   async run() {
     const candidates = (await Promise.all(this.deps.sources.map((source) => source.discover()))).flat();
     const results = [];
@@ -28,13 +28,14 @@ export class MintEngine {
     // also matters for Cloudflare's per-invocation subrequest budget: each inspector call
     // is its own RPC round trip, multiplied across every candidate in a scan pass.
     const inspected = this.deps.inspector && !original.calldata ? await this.deps.inspector.inspect(original) : original;
-    const request = inspected.calldata
-      ? this.requestFromCandidate(inspected)
+    const valued = this.deps.valueOracle ? await this.deps.valueOracle.enrich(inspected) : inspected;
+    const request = valued.calldata
+      ? this.requestFromCandidate(valued)
       : this.deps.calldata
-        ? await this.deps.calldata.build(inspected)
+        ? await this.deps.calldata.build(valued)
         : undefined;
-    if (!request) throw new Error(`candidate ${inspected.id} has no calldata`);
-    const candidate = inspected.calldata ? inspected : { ...inspected, calldata: request.data };
+    if (!request) throw new Error(`candidate ${valued.id} has no calldata`);
+    const candidate = valued.calldata ? valued : { ...valued, calldata: request.data };
     await this.deps.store.save(candidate);
     this.metrics.mark(candidate.id, "classified");
     const simulation = await this.deps.simulator.simulate(candidate, request);

@@ -13,7 +13,29 @@ export class RpcTransactionPreparer {
     // present) is what a viewer actually wants to see and click through to.
     const nftContract = typeof candidate.metadata.nftContract === "string" ? candidate.metadata.nftContract as Address : undefined;
     const name = typeof candidate.metadata.name === "string" ? candidate.metadata.name : undefined;
-    const prepared: PreparedTransaction = { ...request, chainId, gas: simulation.gasEstimate, gasPriceWei: simulation.gasPriceWei, simulationMode: String(simulation.metadata?.simulationMode ?? "unknown"), policy: decision.allowed ? "PASS" : opportunity.expectedValueNative <= 0 ? "SKIP" : "REJECT", reasons: decision.reasons, preparedAt: new Date().toISOString(), candidateId: candidate.id, mintFunction: candidate.mintFunction, abi: candidate.abi, ...(nftContract ? { nftContract } : {}), ...(name ? { name } : {}) };
+    const num = (key: string): number | undefined => {
+      const value = Number(candidate.metadata[key]);
+      return Number.isFinite(value) ? value : undefined;
+    };
+    const prepared: PreparedTransaction = {
+      ...request,
+      chainId,
+      gas: simulation.gasEstimate,
+      gasPriceWei: simulation.gasPriceWei,
+      simulationMode: String(simulation.metadata?.simulationMode ?? "unknown"),
+      policy: decision.allowed ? "PASS" : opportunity.expectedValueNative <= 0 ? "SKIP" : "REJECT",
+      reasons: decision.reasons,
+      preparedAt: new Date().toISOString(),
+      candidateId: candidate.id,
+      mintFunction: candidate.mintFunction,
+      abi: candidate.abi,
+      ...(nftContract ? { nftContract } : {}),
+      ...(name ? { name } : {}),
+      ...(num("estimatedValueNative") !== undefined ? { estimatedValueNative: num("estimatedValueNative") } : {}),
+      ...(num("floorNative") !== undefined ? { floorNative: num("floorNative") } : {}),
+      ...(num("recentMints") !== undefined ? { recentMints: num("recentMints") } : {}),
+      ...(num("valueScore") !== undefined ? { valueScore: num("valueScore") } : {}),
+    };
     await this.store.save(prepared);
     return prepared;
   }
