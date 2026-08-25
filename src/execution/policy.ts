@@ -14,7 +14,7 @@ export function requiresValueSignal(): boolean {
 export function hasValueSignal(candidate: MintCandidate): boolean {
   if (candidate.metadata.valueSignal === true) return true;
   const minFloor = Number(process.env.MIN_FLOOR_NATIVE ?? "0.002");
-  const minMints = Number(process.env.MIN_RECENT_MINTS ?? "3");
+  const minMints = Number(process.env.MIN_RECENT_MINTS ?? "1");
   const minVolume = Number(process.env.MIN_VOLUME_NATIVE ?? "0.05");
   const minScore = Number(process.env.MIN_VALUE_SCORE ?? "20");
   return num(candidate.metadata, "floorNative") >= minFloor

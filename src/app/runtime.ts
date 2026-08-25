@@ -19,6 +19,7 @@ import { JsonlContractRegistry, type ContractRegistry } from "../discovery/rpc/c
 import { JsonlDropStatusStore } from "../discovery/rpc/drop-status";
 import { SeaDropDiscoverySource } from "../discovery/rpc/seadrop-source";
 import { CollectionValueOracle } from "../discovery/value/oracle";
+import { fetchTrendingFreeMints } from "../discovery/heat/trending";
 
 class CompositeInspector { constructor(private readonly inspectors: { inspect(candidate: import("../domain/types").MintCandidate): Promise<import("../domain/types").MintCandidate> }[]) {} async inspect(candidate: import("../domain/types").MintCandidate) { let result = candidate; for (const inspector of this.inspectors) result = await inspector.inspect(result); return result; } }
 
@@ -51,7 +52,24 @@ export function buildRuntime(overrides?: { candidateStore?: CandidateStore; prep
     const contracts = (process.env[`${chain.key.toUpperCase()}_CONTRACTS`] ?? "").split(",").map((address) => address.trim()).filter(Boolean) as `0x${string}`[];
     const etherscan = etherscanFor(chain.key);
     const primary = process.env.DISCOVERY_MODE === "blocks" ? new BlockContractDiscoverySource({ chainKey: chain.key, rpcUrls, confirmations: BigInt(process.env.CONFIRMATIONS ?? "2"), cursor: blockCursor, etherscan, dropStatusStore }) : new EvmRpcDiscoverySource({ chainKey: chain.key, rpcUrls, contracts });
-    const seadrop = process.env.SEADROP_DISCOVERY === "off" ? [] : [new SeaDropDiscoverySource({ chainKey: chain.key, rpcUrls, confirmations: BigInt(process.env.CONFIRMATIONS ?? "2"), cursor: blockCursor, registry: contractRegistry, etherscan, dropStatusStore })];
+    const seadrop = process.env.SEADROP_DISCOVERY === "off" ? [] : [new SeaDropDiscoverySource({
+      chainKey: chain.key,
+      rpcUrls,
+      confirmations: BigInt(process.env.CONFIRMATIONS ?? "2"),
+      cursor: blockCursor,
+      registry: contractRegistry,
+      etherscan,
+      dropStatusStore,
+      boosts: chain.key === "ethereum" && (process.env.TRENDING_DISCOVERY ?? "on") !== "off"
+        ? async () => (await fetchTrendingFreeMints("ethereum")).map((row) => ({
+          contract: row.contract,
+          recentMints: row.mintCount,
+          uniqueMinters: row.uniqueMinters,
+          name: row.name,
+          floorNative: row.floorNative,
+        }))
+        : undefined,
+    })];
     return [primary, ...seadrop];
   });
   const clients = makeClients(chainUrls);
