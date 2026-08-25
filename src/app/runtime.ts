@@ -20,23 +20,12 @@ import { JsonlDropStatusStore } from "../discovery/rpc/drop-status";
 import { SeaDropDiscoverySource } from "../discovery/rpc/seadrop-source";
 import { CollectionValueOracle } from "../discovery/value/oracle";
 import { fetchTrendingFreeMints } from "../discovery/heat/trending";
+import { RobinhoodLaunchpadSource } from "../discovery/launchpads/source";
 
 class CompositeInspector { constructor(private readonly inspectors: { inspect(candidate: import("../domain/types").MintCandidate): Promise<import("../domain/types").MintCandidate> }[]) {} async inspect(candidate: import("../domain/types").MintCandidate) { let result = candidate; for (const inspector of this.inspectors) result = await inspector.inspect(result); return result; } }
 
 export function urlsFor(chainKey: string): string[] { const config = chains[chainKey]; return config ? (process.env[config.rpcEnv] ?? "").split(",").map((url) => url.trim()).filter(Boolean) : []; }
 
-/**
- * `candidateStore`/`preparedStore`/`notifications` default to the local-filesystem
- * JSONL adapters. Pass Supabase-backed ones (see src/storage/supabase.ts) when running
- * somewhere without a filesystem, e.g. a Cloudflare Worker.
- *
- * `chainKeys`, if set, narrows which enabled chains this engine wires up. The
- * inspectors below take a *flat, chain-agnostic* RPC URL list and just try each one
- * in order — fine when only one chain is active, but with several enabled at once a
- * candidate can get inspected against the wrong chain's RPC by coincidence. Scoping
- * to a single chain (see src/discovery/target.ts's /target handling) sidesteps that
- * rather than trusting the shared multi-chain list for a specific, known contract.
- */
 export function buildRuntime(overrides?: { candidateStore?: CandidateStore; preparedStore?: PreparedTransactionStore; notifications?: NotificationSink[]; blockCursor?: BlockCursorStore; contractRegistry?: ContractRegistry; dropStatusStore?: DropStatusStore; chainKeys?: string[] }): MintEngine {
   const activeChains = enabledChains().filter((chain) => !overrides?.chainKeys || overrides.chainKeys.includes(chain.key));
   const chainUrls = activeChains.flatMap((chain) => urlsFor(chain.key).map((rpcUrl) => ({ chainKey: chain.key, rpcUrl })));
@@ -70,7 +59,10 @@ export function buildRuntime(overrides?: { candidateStore?: CandidateStore; prep
         }))
         : undefined,
     })];
-    return [primary, ...seadrop];
+    const launchpads = chain.key === "robinhood" && (process.env.RH_LAUNCHPADS ?? "on") !== "off"
+      ? [new RobinhoodLaunchpadSource({ chainKey: chain.key, rpcUrls, dropStatusStore })]
+      : [];
+    return [primary, ...seadrop, ...launchpads];
   });
   const clients = makeClients(chainUrls);
   const notifications = overrides?.notifications ?? [new ConsoleNotificationSink(), new JsonlNotificationSink(process.env.EVENT_LOG ?? "data/events.jsonl")];
