@@ -71,6 +71,26 @@ export function formatPrepared(tx: PreparedTransaction, index: number): string {
   return lines.join("\n");
 }
 
+/** Short, unprompted ping for a candidate with real demand (see hasValueSignal), sent
+ * as soon as it's prepared rather than waiting for someone to check /upcoming. `index`
+ * is the position it will have in /prepared — pass the real one once a caller exists;
+ * defaults to 0 only to match a lone freshly-prepared candidate. */
+export function formatCookAlert(tx: PreparedTransaction, index = 0): string {
+  const { title, link } = describeMint(tx);
+  const signal = tx.recentMints !== undefined
+    ? `${tx.recentMints} mints this window`
+    : tx.floorNative !== undefined
+      ? `floor ${tx.floorNative} ETH`
+      : "demand detected";
+  return [
+    `COOKING · ${chainNameFor(tx.chainId)}`,
+    `  ${title}`,
+    ...(link ? [`  ${link}`] : []),
+    `  ${signal}`,
+    `  /mint ${index} to fire`,
+  ].join("\n");
+}
+
 export class TelegramCommandBot {
   private offset = 0;
   private stop = false;

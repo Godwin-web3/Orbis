@@ -18,7 +18,8 @@ describe("free mint pipeline", () => {
   });
 
   test("rejects payment-required candidates", async () => {
-    const candidate = { id: "demo-2", chainKey: "base", contract: "0x0000000000000000000000000000000000000001" as `0x${string}`, source: "test", discoveredAt: new Date().toISOString(), mintFunction: "mint", calldata: "0x1234" as `0x${string}`, valueWei: 1n, metadata: { assetType: "nft" } };
+    // Above MAX_LAUNCHPAD_PRICE_NATIVE's default cap (0.001 ETH) — genuinely not "cheap enough to treat as free".
+    const candidate = { id: "demo-2", chainKey: "base", contract: "0x0000000000000000000000000000000000000001" as `0x${string}`, source: "test", discoveredAt: new Date().toISOString(), mintFunction: "mint", calldata: "0x1234" as `0x${string}`, valueWei: 10n ** 16n, metadata: { assetType: "nft" } };
     const classification = await new RuleClassifier().classify(candidate);
     expect(classification.isFree).toBe(false);
     expect(classification.reasons).toContain("payment required");

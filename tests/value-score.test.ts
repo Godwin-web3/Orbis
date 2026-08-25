@@ -83,7 +83,9 @@ describe("CollectionValueOracle", () => {
   test("survives a dead oracle without throwing", async () => {
     const fetchImpl = (async () => { throw new Error("timeout"); }) as unknown as typeof fetch;
     const enriched = await new CollectionValueOracle(fetchImpl).enrich(candidate());
-    expect(enriched.metadata.valueSignal).toBe(false);
+    // No market data comes back, but the candidate's own on-chain recentMints (1) still
+    // clears scoreMintValue's >=1 threshold, so it's signal on its own.
+    expect(enriched.metadata.valueSignal).toBe(true);
     expect(enriched.metadata.estimatedValueNative).toBe(0);
   });
 });
