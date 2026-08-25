@@ -18,6 +18,7 @@ import { JsonlBlockCursorStore, type BlockCursorStore } from "../discovery/rpc/b
 import { JsonlContractRegistry, type ContractRegistry } from "../discovery/rpc/contract-registry";
 import { JsonlDropStatusStore } from "../discovery/rpc/drop-status";
 import { SeaDropDiscoverySource } from "../discovery/rpc/seadrop-source";
+import { CollectionValueOracle } from "../discovery/value/oracle";
 
 class CompositeInspector { constructor(private readonly inspectors: { inspect(candidate: import("../domain/types").MintCandidate): Promise<import("../domain/types").MintCandidate> }[]) {} async inspect(candidate: import("../domain/types").MintCandidate) { let result = candidate; for (const inspector of this.inspectors) result = await inspector.inspect(result); return result; } }
 
@@ -41,10 +42,6 @@ export function buildRuntime(overrides?: { candidateStore?: CandidateStore; prep
   const blockCursor = overrides?.blockCursor ?? new JsonlBlockCursorStore(process.env.BLOCK_CURSOR_PATH ?? "data/block-cursor.json");
   const contractRegistry = overrides?.contractRegistry ?? new JsonlContractRegistry(process.env.CONTRACT_REGISTRY_PATH ?? "data/contract-registry.json");
   const dropStatusStore = overrides?.dropStatusStore ?? new JsonlDropStatusStore(process.env.DROP_STATUS_PATH ?? "data/drop-status.json");
-  // Etherscan's unified v2 API (one key, `chainid` param) replaces raw eth_getLogs for
-  // whichever chains are listed here — it doesn't reject address-less queries or large
-  // block ranges the way free public RPC nodes do. Scoped to Ethereum only for now
-  // (ETHERSCAN_CHAINS lets that widen later without a code change).
   const etherscanApiKey = process.env.ETHERSCAN_API_KEY;
   const etherscanChains = new Set((process.env.ETHERSCAN_CHAINS ?? "ethereum").split(",").map((key) => key.trim()).filter(Boolean));
   const etherscanFor = (chainKey: string) => etherscanApiKey && etherscanChains.has(chainKey) ? { apiKey: etherscanApiKey, chainId: chains[chainKey].chainId } : undefined;
@@ -54,8 +51,6 @@ export function buildRuntime(overrides?: { candidateStore?: CandidateStore; prep
     const contracts = (process.env[`${chain.key.toUpperCase()}_CONTRACTS`] ?? "").split(",").map((address) => address.trim()).filter(Boolean) as `0x${string}`[];
     const etherscan = etherscanFor(chain.key);
     const primary = process.env.DISCOVERY_MODE === "blocks" ? new BlockContractDiscoverySource({ chainKey: chain.key, rpcUrls, confirmations: BigInt(process.env.CONFIRMATIONS ?? "2"), cursor: blockCursor, etherscan, dropStatusStore }) : new EvmRpcDiscoverySource({ chainKey: chain.key, rpcUrls, contracts });
-    // SeaDrop discovery runs alongside whatever DISCOVERY_MODE is configured — it only
-    // catches SeaDrop-launched collections, not a replacement for the general scanner.
     const seadrop = process.env.SEADROP_DISCOVERY === "off" ? [] : [new SeaDropDiscoverySource({ chainKey: chain.key, rpcUrls, confirmations: BigInt(process.env.CONFIRMATIONS ?? "2"), cursor: blockCursor, registry: contractRegistry, etherscan, dropStatusStore })];
     return [primary, ...seadrop];
   });
@@ -65,5 +60,5 @@ export function buildRuntime(overrides?: { candidateStore?: CandidateStore; prep
   const preparedStore = overrides?.preparedStore ?? new JsonlPreparedTransactionStore(process.env.PREPARED_LOG ?? "data/prepared-transactions.jsonl");
   const candidateStore = overrides?.candidateStore ?? new JsonlCandidateStore(process.env.CANDIDATE_LOG ?? "data/candidates.jsonl");
   const claimProvider = httpClaimProvider(process.env.CLAIM_DATA_API, process.env.CLAIM_DATA_API_TOKEN);
-  return new MintEngine({ sources, classifier: new RuleClassifier(), opportunities: new DefaultOpportunityEngine(), simulator: new RpcSimulator(), policy: new DefaultPolicyEngine(), store: candidateStore, notifications: new MultiNotificationSink(notifications), inspector: new CompositeInspector([new EvmContractAbiInspector(chainUrls.map(({ rpcUrl }) => rpcUrl), undefined, undefined), new EvmContractInspector(chainUrls.map(({ rpcUrl }) => rpcUrl)), new EvmEligibilityInspector(chainUrls.map(({ rpcUrl }) => rpcUrl), process.env.SIMULATION_FROM as `0x${string}` | undefined), new EvmClaimInspector(claimProvider)]), calldata: new DefaultCalldataBuilder(), preparer: new RpcTransactionPreparer(clients, preparedStore) });
+  return new MintEngine({ sources, classifier: new RuleClassifier(), opportunities: new DefaultOpportunityEngine(), simulator: new RpcSimulator(), policy: new DefaultPolicyEngine(), store: candidateStore, notifications: new MultiNotificationSink(notifications), inspector: new CompositeInspector([new EvmContractAbiInspector(chainUrls.map(({ rpcUrl }) => rpcUrl), undefined, undefined), new EvmContractInspector(chainUrls.map(({ rpcUrl }) => rpcUrl)), new EvmEligibilityInspector(chainUrls.map(({ rpcUrl }) => rpcUrl), process.env.SIMULATION_FROM as `0x${string}` | undefined), new EvmClaimInspector(claimProvider)]), calldata: new DefaultCalldataBuilder(), preparer: new RpcTransactionPreparer(clients, preparedStore), valueOracle: new CollectionValueOracle() });
 }
