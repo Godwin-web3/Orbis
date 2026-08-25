@@ -1,5 +1,28 @@
 import type { PolicyEngine } from "../domain/ports";
-import type { Opportunity, SimulationResult } from "../domain/types";
+import type { MintCandidate, Opportunity, SimulationResult } from "../domain/types";
+
+function num(metadata: MintCandidate["metadata"], key: string): number {
+  const value = Number(metadata[key] ?? 0);
+  return Number.isFinite(value) ? value : 0;
+}
+
+export function requiresValueSignal(): boolean {
+  return (process.env.REQUIRE_VALUE_SIGNAL ?? "on") !== "off";
+}
+
+/** A drop is worth showing only if someone would pay for it or people are actually minting it. */
+export function hasValueSignal(candidate: MintCandidate): boolean {
+  if (candidate.metadata.valueSignal === true) return true;
+  const minFloor = Number(process.env.MIN_FLOOR_NATIVE ?? "0.002");
+  const minMints = Number(process.env.MIN_RECENT_MINTS ?? "3");
+  const minVolume = Number(process.env.MIN_VOLUME_NATIVE ?? "0.05");
+  const minScore = Number(process.env.MIN_VALUE_SCORE ?? "20");
+  return num(candidate.metadata, "floorNative") >= minFloor
+    || num(candidate.metadata, "estimatedValueNative") >= minFloor
+    || num(candidate.metadata, "recentMints") >= minMints
+    || num(candidate.metadata, "volumeAllTimeNative") >= minVolume
+    || num(candidate.metadata, "valueScore") >= minScore;
+}
 
 export class DefaultPolicyEngine implements PolicyEngine {
   async evaluate(opportunity: Opportunity, simulation: SimulationResult) {
@@ -19,16 +42,12 @@ export class DefaultPolicyEngine implements PolicyEngine {
     // it has no other way to know an arbitrary contract is legitimate.
     if (!opportunity.candidate.metadata.seadrop && !simulation.assetDiff.some((diff) => diff.kind === "nft" && diff.direction === "in")) reasons.push("simulation did not show NFT receipt");
     if (opportunity.gasNative > maxGas) reasons.push(`gas exceeds ${maxGas} native token limit`);
-    // expectedValueNative only means something when a real resale/floor-price estimate was
-    // actually supplied — nothing in this codebase's discovery sources populates
-    // metadata.estimatedValueNative today (no price-oracle integration), so it silently
-    // defaults to 0, making expectedValueNative always just -gasNative and this check
-    // reject every single real candidate, unconditionally, regardless of anything else
-    // being correct. Gating on whether an estimate was actually provided (rather than on
-    // expectedValueNative's value alone) keeps this a real profitability gate for whenever
-    // that integration exists, without it silently vetoing every mint in the meantime.
-    const hasValueEstimate = opportunity.candidate.metadata.estimatedValueNative !== undefined;
+    // Only judge expected value when a real floor-derived estimate exists (> 0). Demand-only
+    // drops have estimatedValueNative = 0 and must not be vetoed by -gas.
+    const estimate = Number(opportunity.candidate.metadata.estimatedValueNative);
+    const hasValueEstimate = Number.isFinite(estimate) && estimate > 0;
     if (hasValueEstimate && opportunity.expectedValueNative <= minExpectedValue) reasons.push("expected value is below configured threshold");
+    if (requiresValueSignal() && !hasValueSignal(opportunity.candidate)) reasons.push("no demand or floor — likely worthless");
     return { allowed: reasons.length === 0, reasons };
   }
 }
