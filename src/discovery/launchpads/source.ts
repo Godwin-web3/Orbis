@@ -3,7 +3,7 @@ import type { DiscoverySource, DropStatusStore } from "../../domain/ports";
 import type { MintCandidate } from "../../domain/types";
 import { fetchHoodMintDrops, type HoodMintDrop } from "./hoodmint";
 import { HoodseaDiscoverySource } from "./hoodsea";
-import { isAffordableMint, parsePriceToWei } from "./price";
+import { isAffordableMint } from "./price";
 
 const GENERIC_MINT_ABI = [
   { type: "function", name: "mint", stateMutability: "payable", inputs: [{ name: "quantity", type: "uint256" }], outputs: [] },
@@ -83,5 +83,3 @@ export class RobinhoodLaunchpadSource implements DiscoverySource {
     return out;
   }
 }
-
-void parsePriceToWei;

@@ -1,4 +1,5 @@
 import type { Address } from "viem";
+import { parsePriceToWei } from "./price";
 
 export type HoodMintDrop = {
   name: string;
@@ -8,6 +9,7 @@ export type HoodMintDrop = {
   minted?: number;
   status?: string;
   free: boolean;
+  priceWei?: bigint;
   url?: string;
 };
 
@@ -27,24 +29,13 @@ function num(value: unknown): number | undefined {
   return undefined;
 }
 
-function isFreePrice(value: unknown): boolean {
-  if (value === true || value === "free" || value === "Free") return true;
-  if (typeof value === "number") return value === 0;
-  if (typeof value === "string") {
-    const v = value.trim().toLowerCase();
-    if (!v || v === "free" || v === "0" || v === "0.0" || v === "0 eth") return true;
-    const n = Number(v.replace(/[^0-9.]/g, ""));
-    return Number.isFinite(n) && n === 0;
-  }
-  return false;
-}
-
 function fromObject(row: Record<string, unknown>): HoodMintDrop | undefined {
   const contract = asAddress(row.contract ?? row.address ?? row.nft ?? row.collection ?? row.nftContract);
   const name = String(row.name ?? row.title ?? row.collectionName ?? row.ticker ?? "").trim();
   if (!name && !contract) return undefined;
   const price = row.price ?? row.mintPrice ?? row.publicPrice ?? row.phasePrice;
-  const free = row.free === true || row.isFree === true || isFreePrice(price);
+  const priceWei = parsePriceToWei(price);
+  const free = row.free === true || row.isFree === true || priceWei === 0n;
   const minted = num(row.minted ?? row.totalMinted ?? row.mintCount ?? row.itemsMinted);
   const supply = num(row.supply ?? row.maxSupply ?? row.totalSupply);
   const status = typeof row.status === "string" ? row.status.toLowerCase() : undefined;
@@ -53,6 +44,7 @@ function fromObject(row: Record<string, unknown>): HoodMintDrop | undefined {
   return {
     name: name || contract || "unknown",
     free,
+    ...(priceWei !== undefined ? { priceWei } : {}),
     ...(ticker ? { ticker } : {}),
     ...(contract ? { contract } : {}),
     ...(minted !== undefined ? { minted } : {}),
@@ -62,7 +54,6 @@ function fromObject(row: Record<string, unknown>): HoodMintDrop | undefined {
   };
 }
 
-/** Accepts the shapes HoodMint is likely to serve: `{ drops: [] }`, `{ collections: [] }`, or a raw array. */
 export function parseHoodMintPayload(input: unknown): HoodMintDrop[] {
   if (!input) return [];
   if (Array.isArray(input)) return input.flatMap((row) => (row && typeof row === "object" ? [fromObject(row as Record<string, unknown>)].filter(Boolean) : [])) as HoodMintDrop[];
@@ -72,10 +63,6 @@ export function parseHoodMintPayload(input: unknown): HoodMintDrop[] {
   return parseHoodMintPayload(rows);
 }
 
-/**
- * Best-effort parse of hoodmint.online/drops/open HTML.
- * A drop only becomes mintable if we also find a 0x contract on that card.
- */
 export function parseHoodMintHtml(html: string): HoodMintDrop[] {
   const chunks = html.split(/<h[23][^>]*>|#{2,3}\s+/i).slice(1);
   const out: HoodMintDrop[] = [];
@@ -92,10 +79,13 @@ export function parseHoodMintHtml(html: string): HoodMintDrop[] {
     const nameMatch = text.match(/^([A-Za-z0-9][A-Za-z0-9 .'_-]{1,60})/);
     const soldOut = /\bsold out\b/i.test(text);
     const open = /\bopen\b/i.test(text);
+    const ethMatch = text.match(/\b(0\.\d{1,6})\b/);
+    const priceWei = free ? 0n : ethMatch ? parsePriceToWei(ethMatch[1]) : undefined;
     if (!contract && !nameMatch) continue;
     const drop: HoodMintDrop = {
       name: (nameMatch?.[1] ?? contract ?? "unknown").trim(),
       free,
+      ...(priceWei !== undefined ? { priceWei } : {}),
       status: soldOut ? "sold_out" : open ? "open" : undefined,
       ...(contract ? { contract } : {}),
       ...(tickerMatch ? { ticker: tickerMatch[1] } : {}),
@@ -143,7 +133,6 @@ export async function fetchHoodMintDrops(opts: { urls?: string[]; fetchImpl?: ty
       }
       if (found.some((drop) => drop.contract)) break;
     } catch {
-      // next url
     } finally {
       clearTimeout(timer);
     }
