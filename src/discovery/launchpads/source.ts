@@ -3,6 +3,7 @@ import type { DiscoverySource, DropStatusStore } from "../../domain/ports";
 import type { MintCandidate } from "../../domain/types";
 import { fetchHoodMintDrops, type HoodMintDrop } from "./hoodmint";
 import { HoodseaDiscoverySource } from "./hoodsea";
+import { isAffordableMint, parsePriceToWei } from "./price";
 
 const GENERIC_MINT_ABI = [
   { type: "function", name: "mint", stateMutability: "payable", inputs: [{ name: "quantity", type: "uint256" }], outputs: [] },
@@ -10,9 +11,10 @@ const GENERIC_MINT_ABI = [
 
 function hoodmintCandidate(chainKey: string, drop: HoodMintDrop): MintCandidate | undefined {
   if (!drop.contract) return undefined;
-  if (!drop.free) return undefined;
   if (drop.status === "sold_out" || drop.status === "soldout") return undefined;
   if (drop.supply !== undefined && drop.minted !== undefined && drop.minted >= drop.supply) return undefined;
+  const priceWei = drop.priceWei ?? (drop.free ? 0n : undefined);
+  if (priceWei === undefined || !isAffordableMint(priceWei)) return undefined;
   const minted = drop.minted ?? 0;
   return {
     id: `${chainKey}:hoodmint:${drop.contract}`,
@@ -22,7 +24,7 @@ function hoodmintCandidate(chainKey: string, drop: HoodMintDrop): MintCandidate 
     discoveredAt: new Date().toISOString(),
     mintFunction: "mint",
     calldata: encodeFunctionData({ abi: GENERIC_MINT_ABI, functionName: "mint", args: [1n] }),
-    valueWei: 0n,
+    valueWei: priceWei,
     active: true,
     eligible: true,
     metadata: {
@@ -32,6 +34,7 @@ function hoodmintCandidate(chainKey: string, drop: HoodMintDrop): MintCandidate 
       name: drop.name,
       recentMints: minted,
       valueSignal: minted >= 1,
+      mintPrice: priceWei.toString(),
       ...(drop.ticker ? { ticker: drop.ticker } : {}),
       ...(drop.url ? { mintUrl: drop.url } : { mintUrl: "https://hoodmint.online/drops/open" }),
     },
@@ -45,7 +48,7 @@ export class HoodMintDiscoverySource implements DiscoverySource {
     if (this.chainKey !== "robinhood") return [];
     const drops = await fetchHoodMintDrops({ fetchImpl: this.fetchImpl });
     const candidates = drops.map((drop) => hoodmintCandidate(this.chainKey, drop)).filter((row): row is MintCandidate => Boolean(row));
-    console.log(`[${this.chainKey}] hoodmint: ${drops.length} drop(s) listed, ${candidates.length} free with a contract`);
+    console.log(`[${this.chainKey}] hoodmint: ${drops.length} drop(s) listed, ${candidates.length} cheap with a contract`);
     return candidates;
   }
 }
@@ -80,3 +83,5 @@ export class RobinhoodLaunchpadSource implements DiscoverySource {
     return out;
   }
 }
+
+void parsePriceToWei;
