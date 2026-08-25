@@ -1,5 +1,6 @@
 import type { Classifier } from "../domain/ports";
 import type { Classification, MintCandidate, SimulationResult } from "../domain/types";
+import { isAffordableMint } from "../discovery/launchpads/price";
 
 export class RuleClassifier implements Classifier {
   async classify(candidate: MintCandidate, simulation?: SimulationResult): Promise<Classification> {
@@ -12,12 +13,13 @@ export class RuleClassifier implements Classifier {
     const hasNftBurn = metadata.burnRequired === true || simulation?.assetDiff.some((diff) => diff.kind === "nft" && diff.direction === "out") === true;
     const requiresSignature = metadata.signatureRequired === true;
     const paymentKind = hasNativePayment ? "native" : hasErc20Fee ? "erc20" : hasNftBurn ? "nft-burn" : requiresSignature ? "signature" : "none";
-    const isFree = paymentKind === "none";
+    const cheapNative = paymentKind === "native" && isAffordableMint(candidate.valueWei);
+    const isFree = paymentKind === "none" || cheapNative;
     const isActive = candidate.active !== false;
     const isEligible = candidate.eligible !== false;
     if (!isNft) reasons.push("not classified as NFT");
     if (!isMintOrClaim) reasons.push("no mint or claim action");
-    if (!isFree) reasons.push(paymentKind === "native" ? "payment required" : `wallet state transition requires ${paymentKind}`);
+    if (paymentKind !== "none" && !cheapNative) reasons.push(paymentKind === "native" ? "payment required" : `wallet state transition requires ${paymentKind}`);
     if (!isActive) reasons.push("inactive");
     if (!isEligible) reasons.push("wallet not eligible");
     return { isNft, isMintOrClaim, isFree, isActive, isEligible, paymentKind, reasons };
