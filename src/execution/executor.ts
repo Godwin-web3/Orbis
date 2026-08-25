@@ -12,6 +12,10 @@ export const MINTER_ABI = [
   { inputs: [], name: "MAX_LIMIT_PER_PUBLIC_ADDRS", outputs: [{ type: "uint256" }], stateMutability: "view", type: "function" },
 ] as const;
 
+export const ERC721_BALANCE_ABI = [
+  { inputs: [{ name: "owner", type: "address" }], name: "balanceOf", outputs: [{ type: "uint256" }], stateMutability: "view", type: "function" },
+] as const;
+
 export const BATCH_EXECUTOR_ABI = [
   {
     name: "execute",
@@ -83,7 +87,6 @@ export class RpcExecutor implements Executor {
   private async guardAgainstStaleMint(chainId: number, prepared: PreparedTransaction): Promise<bigint> {
     const publicClient = this.publicClient(chainId);
     const abi = (prepared.abi as unknown[] | undefined) ?? (MINTER_ABI as unknown as unknown[]);
-    const fn = prepared.mintFunction ?? "publicMint";
     const from = (prepared.from ?? this.address) as Address;
     const args = { address: prepared.to, abi, account: from } as const;
 
@@ -94,7 +97,9 @@ export class RpcExecutor implements Executor {
 
     if (price !== 0n) throw new Error(`Mint is no longer free (price=${price.toString()} wei). Aborting.`);
     if (open === false) throw new Error("Mint is closed. Aborting.");
-    if (owned + 1n > limit) throw new Error(`Per-address limit reached (${owned.toString()}/${limit.toString()}). Aborting.`);
+    // limit === 0n means the ABI has no per-address cap (SeaDrop and most generic mints).
+    // Treating 0 as a real cap aborted every SeaDrop /mint with "0/0".
+    if (limit !== 0n && owned + 1n > limit) throw new Error(`Per-address limit reached (${owned.toString()}/${limit.toString()}). Aborting.`);
     return owned;
   }
 
@@ -169,13 +174,18 @@ export class RpcExecutor implements Executor {
     const publicClient = this.publicClient(prepared.chainId);
     const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 90_000 });
     if (receipt.status !== "success") return { success: false, ownerConfirmed: false, reason: `transaction status ${receipt.status}` };
-    let ownerConfirmed = false;
-    let ownedAfter: bigint | undefined;
-    if (hasMethod(prepared.abi as unknown[] | undefined, "balanceOf")) {
-      const from = (prepared.from ?? this.address) as Address;
-      ownedAfter = (await publicClient.readContract({ address: prepared.to, abi: prepared.abi as unknown[], functionName: "balanceOf", args: [from] })) as bigint;
-      ownerConfirmed = ownedAfter > 0n;
+    const from = (prepared.from ?? this.address) as Address;
+    const nft = prepared.nftContract ?? prepared.to;
+    try {
+      const ownedAfter = (await publicClient.readContract({
+        address: nft,
+        abi: ERC721_BALANCE_ABI,
+        functionName: "balanceOf",
+        args: [from],
+      })) as bigint;
+      return { success: true, ownerConfirmed: ownedAfter > 0n, gasUsed: receipt.gasUsed, ownedAfter };
+    } catch {
+      return { success: true, ownerConfirmed: false, gasUsed: receipt.gasUsed, reason: "balanceOf unavailable on nft contract" };
     }
-    return { success: true, ownerConfirmed, gasUsed: receipt.gasUsed, ownedAfter };
   }
 }
