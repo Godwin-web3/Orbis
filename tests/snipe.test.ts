@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { selectArmTargets } from "../src/execution/snipe";
+import { selectArmTargets, resolveSnipeGas, SEADROP_PUBLIC_MINT_GAS } from "../src/execution/snipe";
 import type { DropStatus } from "../src/domain/types";
 
 function status(overrides: Partial<DropStatus> = {}): DropStatus {
@@ -43,5 +43,19 @@ describe("selectArmTargets", () => {
     const b = status({ id: "b", chainKey: "robinhood", startTime: now + 12 });
     const result = selectArmTargets([a, b], now, 15, new Set());
     expect(result).toHaveLength(2);
+  });
+});
+
+describe("resolveSnipeGas", () => {
+  test("uses a live estimate with 20% headroom when the window is already open", async () => {
+    expect(await resolveSnipeGas(async () => 200_000n)).toBe(240_000n);
+  });
+
+  test("falls back to the SeaDrop ceiling when estimateGas reverts (sale not open yet)", async () => {
+    expect(await resolveSnipeGas(async () => { throw new Error("execution reverted"); })).toBe(SEADROP_PUBLIC_MINT_GAS);
+  });
+
+  test("falls back when estimateGas returns 0", async () => {
+    expect(await resolveSnipeGas(async () => 0n)).toBe(SEADROP_PUBLIC_MINT_GAS);
   });
 });

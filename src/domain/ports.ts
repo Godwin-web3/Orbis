@@ -11,7 +11,6 @@ export interface Signer { sign(request: TransactionRequest): Promise<`0x${string
 export interface NonceManager { reserve(chainKey: string): Promise<number>; release(chainKey: string, nonce: number): Promise<void>; }
 export interface Broadcaster { send(rawTransaction: `0x${string}`): Promise<`0x${string}`>; }
 export interface Executor { execute(request: TransactionRequest): Promise<{ txHash: `0x${string}` }>; }
-export interface Verifier { verify(txHash: `0x${string}`, candidate: MintCandidate): Promise<{ success: boolean; ownerConfirmed: boolean; gasUsed?: bigint; reason?: string }>; }
 export interface GasStrategy { gasLimit(simulation: SimulationResult): bigint | undefined; }
 export interface NotificationSink { send(message: string): Promise<void>; }
 export interface CandidateStore { save(candidate: MintCandidate): Promise<void>; list(): Promise<MintCandidate[]>; }
