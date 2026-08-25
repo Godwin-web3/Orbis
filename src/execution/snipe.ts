@@ -7,6 +7,25 @@ import type { AutoMintLog } from "./automint";
 import { SEADROP_ADDRESS, encodeMintPublic, readPublicDrop, resolveFeeRecipient } from "../discovery/rpc/seadrop-source";
 import { blastToAll, prepareBlast, waitForReceipt } from "./rpc-blast";
 
+/**
+ * SeaDrop mintPublic reverts before startTime, so estimateGas against current
+ * state fails while arming. Public-phase mints sit well under this ceiling.
+ */
+export const SEADROP_PUBLIC_MINT_GAS = 250_000n;
+
+/** Prefer a live estimate; fall back to the SeaDrop ceiling when the window is still closed. */
+export async function resolveSnipeGas(
+  estimate: () => Promise<bigint>,
+): Promise<bigint> {
+  try {
+    const estimated = await estimate();
+    if (estimated > 0n) return (estimated * 12n) / 10n;
+  } catch {
+    // expected when mintPublic checks startTime against the current block
+  }
+  return SEADROP_PUBLIC_MINT_GAS;
+}
+
 /** Every "upcoming" drop whose start time falls within the arm window and hasn't already been picked up this pass. Pure and separately tested — the actual timing/network work happens in SnipeScheduler.armAndFire. */
 export function selectArmTargets(all: DropStatus[], now: number, armLeadSeconds: number, alreadyArming: Set<string>): DropStatus[] {
   return all.filter((d) => d.status === "upcoming" && d.startTime > now && d.startTime - now <= armLeadSeconds && !alreadyArming.has(d.id));
@@ -106,17 +125,20 @@ export class SnipeScheduler {
     const [nonce, fees, gas] = await Promise.all([
       client.getTransactionCount({ address: from, blockTag: "pending" }),
       client.estimateFeesPerGas(),
-      client.estimateGas({ account: from, to: SEADROP_ADDRESS, data, value: 0n }),
+      resolveSnipeGas(() => client.estimateGas({ account: from, to: SEADROP_ADDRESS, data, value: 0n })),
     ]);
+    // Fees are sampled ~15s before fire — pad so a small bump doesn't stall the pre-signed tx.
+    const maxFeePerGas = (fees.maxFeePerGas * 15n) / 10n;
+    const maxPriorityFeePerGas = (fees.maxPriorityFeePerGas * 15n) / 10n;
     return account.signTransaction({
       chainId,
       to: SEADROP_ADDRESS,
       data,
       value: 0n,
       nonce,
-      gas: (gas * 12n) / 10n, // 20% headroom — the estimate is against current state, which may shift slightly by fire time
-      maxFeePerGas: fees.maxFeePerGas,
-      maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
+      gas,
+      maxFeePerGas,
+      maxPriorityFeePerGas,
       type: "eip1559",
     });
   }

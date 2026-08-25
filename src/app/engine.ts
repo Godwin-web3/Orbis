@@ -28,10 +28,15 @@ export class MintEngine {
     // also matters for Cloudflare's per-invocation subrequest budget: each inspector call
     // is its own RPC round trip, multiplied across every candidate in a scan pass.
     const inspected = this.deps.inspector && !original.calldata ? await this.deps.inspector.inspect(original) : original;
-    const candidate = this.deps.calldata && !inspected.calldata ? { ...inspected, calldata: (await this.deps.calldata.build(inspected)).data } : inspected;
+    const request = inspected.calldata
+      ? this.requestFromCandidate(inspected)
+      : this.deps.calldata
+        ? await this.deps.calldata.build(inspected)
+        : undefined;
+    if (!request) throw new Error(`candidate ${inspected.id} has no calldata`);
+    const candidate = inspected.calldata ? inspected : { ...inspected, calldata: request.data };
     await this.deps.store.save(candidate);
     this.metrics.mark(candidate.id, "classified");
-    const request = this.deps.calldata ? await this.deps.calldata.build(candidate) : this.requestFromCandidate(candidate);
     const simulation = await this.deps.simulator.simulate(candidate, request);
     this.metrics.mark(candidate.id, "simulated");
     const classification = await this.deps.classifier.classify(candidate, simulation);
