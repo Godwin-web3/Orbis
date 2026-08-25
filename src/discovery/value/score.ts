@@ -82,7 +82,7 @@ export function scoreMintValue(input: ValueInputs): ValueScore {
 
   score = clamp(Math.round(score), 0, 100);
 
-  const hasSignal = floor >= 0.002 || recent >= 3 || volume >= 0.05 || score >= 20;
+  const hasSignal = floor >= 0.002 || recent >= 1 || volume >= 0.05 || score >= 20;
   if (!hasSignal) reasons.push("no demand or floor");
 
   return { estimatedValueNative, valueScore: score, hasSignal, reasons };
