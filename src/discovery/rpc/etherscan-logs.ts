@@ -9,6 +9,29 @@ type EtherscanResponse = { status: string; message: string; result: unknown };
 type EtherscanLogRow = { address: string; topics: string[]; data: string; blockNumber: string };
 
 /**
+ * A single scan pass runs every discovery source concurrently (see MintEngine.run), and
+ * on Ethereum both BlockContractDiscoverySource and SeaDropDiscoverySource call this
+ * module with the same API key at essentially the same instant — plus pagination within
+ * one call adds more. That reliably tripped Etherscan's per-second cap ("Max calls per
+ * sec rate limit reached"). This throttle is shared module state (not per-call-site), so
+ * every caller queues behind the same clock regardless of which source or which page.
+ * Read fresh each call (not cached at module load) so a test can set it to 0.
+ */
+let lastCallAt = 0;
+let throttleQueue: Promise<void> = Promise.resolve();
+
+function throttle(): Promise<void> {
+  const scheduled = throttleQueue.then(async () => {
+    const minIntervalMs = Number(process.env.ETHERSCAN_MIN_INTERVAL_MS ?? "400");
+    const wait = lastCallAt + minIntervalMs - Date.now();
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+    lastCallAt = Date.now();
+  });
+  throttleQueue = scheduled.catch(() => {});
+  return scheduled;
+}
+
+/**
  * Fetches event logs via Etherscan's unified v2 API (one API key, `chainid` param
  * selects the network) instead of a raw eth_getLogs JSON-RPC call. Two things free/public
  * RPC providers on Ethereum don't reliably give: address-less topic-only queries (needed
@@ -40,6 +63,7 @@ export async function fetchLogsViaEtherscan(
     url.searchParams.set("offset", String(offset));
     url.searchParams.set("apikey", config.apiKey);
 
+    await throttle();
     const response = await fetch(url.toString());
     const body = (await response.json()) as EtherscanResponse;
     if (body.status !== "1") {

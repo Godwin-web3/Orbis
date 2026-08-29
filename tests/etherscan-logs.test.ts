@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { fetchLogsViaEtherscan } from "../src/discovery/rpc/etherscan-logs";
 
+process.env.ETHERSCAN_MIN_INTERVAL_MS = "0"; // no reason for the real-world rate-limit throttle to slow tests down
+
 const originalFetch = globalThis.fetch;
 
 afterEach(() => {
@@ -64,5 +66,26 @@ describe("fetchLogsViaEtherscan", () => {
     expect(url.searchParams.get("topic2")).toBe("0xtopic2");
     expect(url.searchParams.get("topic1")).toBeNull();
     expect(url.searchParams.get("apikey")).toBe("mykey");
+  });
+
+  test("throttles concurrent calls so two sources hitting the same key don't trip Etherscan's per-second cap", async () => {
+    const originalInterval = process.env.ETHERSCAN_MIN_INTERVAL_MS;
+    process.env.ETHERSCAN_MIN_INTERVAL_MS = "50";
+    const calledAt: number[] = [];
+    globalThis.fetch = (async () => {
+      calledAt.push(Date.now());
+      return { json: async () => ({ status: "1", message: "OK", result: [] }) } as Response;
+    }) as unknown as typeof fetch;
+    try {
+      // Two independent "sources" calling in at the same instant, like block-source.ts and seadrop-source.ts do in one scan pass.
+      await Promise.all([
+        fetchLogsViaEtherscan({ apiKey: "key", chainId: 1 }, { topics: ["0xtopic0"], fromBlock: 1n, toBlock: 10n }),
+        fetchLogsViaEtherscan({ apiKey: "key", chainId: 1 }, { topics: ["0xtopic1"], fromBlock: 1n, toBlock: 10n }),
+      ]);
+      expect(calledAt.length).toBe(2);
+      expect(Math.abs(calledAt[1] - calledAt[0])).toBeGreaterThanOrEqual(45);
+    } finally {
+      process.env.ETHERSCAN_MIN_INTERVAL_MS = originalInterval;
+    }
   });
 });
