@@ -19,7 +19,7 @@ import { JsonlContractRegistry, type ContractRegistry } from "../discovery/rpc/c
 import { JsonlDropStatusStore } from "../discovery/rpc/drop-status";
 import { SeaDropDiscoverySource } from "../discovery/rpc/seadrop-source";
 import { CollectionValueOracle } from "../discovery/value/oracle";
-import { fetchTrendingFreeMints } from "../discovery/heat/trending";
+import { TrendingMintDiscoverySource } from "../discovery/heat/source";
 import { RobinhoodLaunchpadSource } from "../discovery/launchpads/source";
 
 class CompositeInspector { constructor(private readonly inspectors: { inspect(candidate: import("../domain/types").MintCandidate): Promise<import("../domain/types").MintCandidate> }[]) {} async inspect(candidate: import("../domain/types").MintCandidate) { let result = candidate; for (const inspector of this.inspectors) result = await inspector.inspect(result); return result; } }
@@ -49,20 +49,14 @@ export function buildRuntime(overrides?: { candidateStore?: CandidateStore; prep
       registry: contractRegistry,
       etherscan,
       dropStatusStore,
-      boosts: chain.key === "ethereum" && (process.env.TRENDING_DISCOVERY ?? "on") !== "off"
-        ? async () => (await fetchTrendingFreeMints("ethereum")).map((row) => ({
-          contract: row.contract,
-          recentMints: row.mintCount,
-          uniqueMinters: row.uniqueMinters,
-          name: row.name,
-          floorNative: row.floorNative,
-        }))
-        : undefined,
     })];
     const launchpads = chain.key === "robinhood" && (process.env.RH_LAUNCHPADS ?? "on") !== "off"
       ? [new RobinhoodLaunchpadSource({ chainKey: chain.key, rpcUrls, dropStatusStore })]
       : [];
-    return [primary, ...seadrop, ...launchpads];
+    // Reservoir's trending-mints ranking (see discovery/heat) only covers Ethereum and Base —
+    // a no-op elsewhere, so it's safe to include unconditionally rather than special-case chains.
+    const trending = (process.env.TRENDING_DISCOVERY ?? "on") === "off" ? [] : [new TrendingMintDiscoverySource({ chainKey: chain.key, rpcUrls })];
+    return [primary, ...seadrop, ...launchpads, ...trending];
   });
   const clients = makeClients(chainUrls);
   const notifications = overrides?.notifications ?? [new ConsoleNotificationSink(), new JsonlNotificationSink(process.env.EVENT_LOG ?? "data/events.jsonl")];

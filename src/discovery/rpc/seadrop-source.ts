@@ -69,7 +69,7 @@ const RETRY_BLOCK_RANGE = 10n;
 const ETHERSCAN_BLOCK_RANGE = 5000n;
 const DEFAULT_MAX_REGISTRY_RECHECK = 15;
 
-export type SeaDropDiscoveryConfig = { chainKey: string; rpcUrls: string[]; confirmations?: bigint; client?: PublicClient; cursor?: BlockCursorStore; registry?: ContractRegistry; quantity?: number; etherscan?: { apiKey: string; chainId: number }; maxRegistryRecheck?: number; dropStatusStore?: DropStatusStore; boosts?: () => Promise<{ contract: `0x${string}`; recentMints?: number; uniqueMinters?: number; name?: string; floorNative?: number }[]> };
+export type SeaDropDiscoveryConfig = { chainKey: string; rpcUrls: string[]; confirmations?: bigint; client?: PublicClient; cursor?: BlockCursorStore; registry?: ContractRegistry; quantity?: number; etherscan?: { apiKey: string; chainId: number }; maxRegistryRecheck?: number; dropStatusStore?: DropStatusStore };
 
 export class SeaDropDiscoverySource implements DiscoverySource {
   readonly name = "seadrop";

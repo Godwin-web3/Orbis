@@ -69,6 +69,10 @@ Set `ETHERSCAN_API_KEY` (free at [etherscan.io/apis](https://etherscan.io/apis))
 
 For chains Etherscan doesn't cover well (e.g. **Robinhood Chain**), point that chain's `*_RPC_URL` at a dedicated provider like [Alchemy](https://www.alchemy.com/rpc/robinhood) instead of a shared public endpoint — no code change needed, since RPC URLs are already just env vars.
 
+### Trending-mint discovery (real runners, not just any free mint)
+
+`src/discovery/heat/source.ts`'s `TrendingMintDiscoverySource` surfaces collections with real, live mint velocity — Reservoir's trending-mints ranking over a short window (`TRENDING_PERIOD`, default `10m`), filtered to at least `TRENDING_MIN_MINTS` (default `5`) mints in that window. This is a different bar than "no demand or floor" in the policy engine below: that gate only asks whether *anyone* is minting; this source specifically looks for the kind of fast, accelerating activity that marks an actual runner, independent of whether SeaDrop or the block scanner have caught up to it yet. Set `TRENDING_DISCOVERY=off` to disable it. Reservoir only indexes Ethereum and Base, so this is a no-op on Robinhood Chain.
+
 ## Chain configuration
 
 Configured network records include Ethereum, Base, Arbitrum, Optimism, Polygon, and Robinhood Chain. RPC URLs are supplied by environment variables; no public RPC endpoint is hardcoded. Robinhood Chain uses chain ID `4663` for mainnet and `46630` for testnet.
