@@ -32,9 +32,11 @@ describe("fetchLogsViaEtherscan", () => {
     expect(logs).toEqual([]);
   });
 
-  test("throws on a real API error", async () => {
-    stubFetch([{ status: "0", message: "Invalid API Key", result: [] }]);
-    await expect(fetchLogsViaEtherscan({ apiKey: "bad", chainId: 1 }, { topics: ["0xtopic0"], fromBlock: 1n, toBlock: 100n })).rejects.toThrow("Invalid API Key");
+  test("throws with the real reason, not just the generic NOTOK message", async () => {
+    // Etherscan's own convention: `message` is always the literal "NOTOK" on failure —
+    // the actual reason lives in `result` instead.
+    stubFetch([{ status: "0", message: "NOTOK", result: "Missing/Invalid API Key" }]);
+    await expect(fetchLogsViaEtherscan({ apiKey: "bad", chainId: 1 }, { topics: ["0xtopic0"], fromBlock: 1n, toBlock: 100n })).rejects.toThrow("Missing/Invalid API Key");
   });
 
   test("paginates when a page returns a full page of results", async () => {

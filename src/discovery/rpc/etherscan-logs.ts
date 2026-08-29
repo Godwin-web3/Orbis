@@ -44,7 +44,9 @@ export async function fetchLogsViaEtherscan(
     const body = (await response.json()) as EtherscanResponse;
     if (body.status !== "1") {
       if (body.message === "No records found") break;
-      throw new Error(`Etherscan getLogs failed: ${body.message}`);
+      // Etherscan's `message` is always the literal string "NOTOK" on failure — the actual
+      // reason (bad key, rate limit, invalid params, etc.) is in `result` instead.
+      throw new Error(`Etherscan getLogs failed: ${body.message} — ${String(body.result)}`);
     }
 
     const rows = body.result as EtherscanLogRow[];
