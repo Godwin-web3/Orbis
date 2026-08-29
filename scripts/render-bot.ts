@@ -26,6 +26,7 @@ import { NonCustodialRelay } from "../src/execution/noncustodial";
 import { AutoMintLoop } from "../src/execution/automint";
 import { SnipeScheduler } from "../src/execution/snipe";
 import { ConsoleNotificationSink } from "../src/notifications/console";
+import { TelegramAlertSink } from "../src/notifications/telegram";
 import { parseEncryptionKey } from "../src/users/crypto";
 import { parseTargetInput, processTarget, checkSeaDropTarget } from "../src/discovery/target";
 import { TelegramCommandBot } from "../src/telegram/bot";
@@ -80,6 +81,10 @@ async function main() {
   const keystore = encryptionKeyHex ? new SupabaseUserKeyStore(db, parseEncryptionKey(encryptionKeyHex)) : undefined;
 
   const runtimeOverrides = { candidateStore, preparedStore: prepared, notifications: [new ConsoleNotificationSink()], blockCursor, contractRegistry, dropStatusStore };
+  // TELEGRAM_CHAT_ID is the push target; falls back to the first admin so an operator who
+  // only set TELEGRAM_ADMIN_IDS still gets background-scan alerts without a second var.
+  const alertChatId = process.env.TELEGRAM_CHAT_ID || allowed[0];
+  const backgroundScanOverrides = { ...runtimeOverrides, notifications: [...runtimeOverrides.notifications, new TelegramAlertSink(token, alertChatId)] };
 
   const bot = new TelegramCommandBot(token, allowed, {
     prepared,
@@ -116,7 +121,7 @@ async function main() {
   const scanIntervalMs = Number(process.env.SCAN_INTERVAL_MS ?? "120000");
   async function runScan(): Promise<void> {
     try {
-      const engine = buildRuntime(runtimeOverrides);
+      const engine = buildRuntime(backgroundScanOverrides);
       const { count } = await engine.run();
       console.log(`Background scan complete: ${count} candidate(s) processed.`);
     } catch (error) {
